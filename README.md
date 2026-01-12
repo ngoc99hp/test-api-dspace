@@ -1,36 +1,215 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# 📘 Ghi chú tích hợp DSpace 6.3 REST API
 
-## Getting Started
+Tài liệu này dùng để **ghi chú nhanh các vấn đề, bẫy kỹ thuật và best-practice** khi tích hợp **DSpace 6.3 REST API** vào ứng dụng web (Next.js / React / SPA), dựa trên quá trình test thực tế.
 
-First, run the development server:
+> 🎯 Mục tiêu: giúp đồng nghiệp **đỡ mất thời gian debug**, hiểu đúng bản chất API của DSpace 6.x.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+---
+
+## 1. Tổng quan quan trọng (CẦN ĐỌC TRƯỚC)
+
+* DSpace 6.3 sử dụng **REST API thế hệ cũ** (Servlet / JAXB)
+* ❌ Không phải REST hiện đại
+* ❌ Không đảm bảo JSON cho mọi endpoint
+* ✔ Có thể trả **XML / JSON / HTML** tuỳ ngữ cảnh
+Thay thế collection_id khi test
+
+👉 **Không bao giờ giả định response luôn là JSON**
+
+---
+
+## 2. Cơ chế đăng nhập & session (RẤT QUAN TRỌNG)
+
+### 2.1 Login KHÔNG trả session đầy đủ
+
+Endpoint:
+
+```
+POST /rest/login
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+* Chỉ dùng để **set session cookie (JSESSIONID)**
+* Response **không đáng tin để hiển thị user info**
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+👉 **Không dùng response của `/rest/login` để hiển thị trạng thái đăng nhập**
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
+### 2.2 Luôn kiểm tra session bằng `/rest/status`
 
-To learn more about Next.js, take a look at the following resources:
+Endpoint chuẩn để kiểm tra đăng nhập:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+GET /rest/status
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Response mẫu:
 
-## Deploy on Vercel
+```json
+{
+  "okay": true,
+  "authenticated": true,
+  "email": "user@domain",
+  "fullname": "User Name",
+  "sourceVersion": null,
+  "apiVersion": null
+}
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+👉 Đây là **nguồn dữ liệu session DUY NHẤT đáng tin**
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+### 2.3 Cookie là bắt buộc
+
+* DSpace dùng **session-cookie-based auth**
+* Không dùng token / JWT
+
+⚠️ Khi proxy qua Next.js API route:
+
+* Phải **forward Cookie** từ client → DSpace
+* Phải bật `credentials: "include"` ở fetch phía client
+
+---
+
+## 3. Content Negotiation – Vì sao Postman trả JSON, Browser lại trả XML?
+
+### 3.1 DSpace 6.3 quyết định format dựa trên header
+
+DSpace xem các header sau:
+
+* `Accept`
+* `User-Agent`
+
+### 3.2 Postman mặc định gửi
+
+```
+Accept: application/json
+User-Agent: PostmanRuntime/7.x
+```
+
+→ DSpace trả JSON
+
+### 3.3 Browser / fetch thường KHÔNG gửi đủ
+
+→ DSpace fallback sang XML hoặc HTML
+
+---
+
+### 3.4 Cách ép DSpace trả JSON
+
+```http
+Accept: application/json
+User-Agent: PostmanRuntime/7.x
+```
+
+⚠️ Lưu ý: **KHÔNG phải endpoint nào cũng tôn trọng Accept**
+
+---
+
+## 4. Vấn đề XML / JSON khi tạo Item
+
+### 4.1 Endpoint tạo Item
+
+```
+POST /rest/collections/{collectionId}/items
+```
+
+* Có thể trả:
+
+  * XML (phổ biến)
+  * JSON (nếu header phù hợp)
+
+Ví dụ XML:
+
+```xml
+<item>
+  <UUID>...</UUID>
+  <handle>...</handle>
+  <archived>true</archived>
+</item>
+```
+
+👉 Item **đã được tạo thành công**, dù UI báo lỗi parse JSON
+
+---
+
+### 4.2 Không parse JSON mù quáng
+
+❌ Sai:
+
+```js
+await res.json();
+```
+
+✅ Đúng:
+
+```js
+const text = await res.text();
+```
+
+Sau đó:
+
+* Detect XML / JSON
+* Format hiển thị ở UI
+
+---
+
+## 5. Best Practice kiến trúc (RẤT KHUYẾN NGHỊ)
+
+### 5.1 API layer làm nhiệm vụ normalize
+
+* API route nhận **XML / JSON / HTML** từ DSpace
+* API route trả **JSON thống nhất** cho frontend
+
+Frontend:
+
+* ❌ Không parse XML
+* ✔ Chỉ render dữ liệu
+
+---
+
+### 5.2 UI test (API Tester)
+
+Nếu viết UI để test API nội bộ:
+
+* Cho phép hiển thị **raw response**
+* Detect & pretty-print XML / JSON
+* Không che giấu lỗi thật bằng message "success"
+
+---
+
+## 6. Những lỗi thường gặp
+
+| Lỗi                                    | Nguyên nhân                 | Ghi chú                         |
+| -------------------------------------- | --------------------------- | ------------------------------- |
+| 401 Unauthorized                       | Sai cookie / chưa login     | Kiểm tra `/rest/status`         |
+| Unexpected token '<'                   | Parse XML bằng `res.json()` | Luôn dùng `res.text()`          |
+| Login success nhưng không có user info | Dùng sai endpoint           | Phải gọi `/rest/status`         |
+| Postman OK, UI lỗi                     | Thiếu header Accept         | Thêm `Accept: application/json` |
+
+---
+
+## 7. Những thứ DSpace 6.3 KHÔNG có
+
+* ❌ JWT / OAuth2
+* ❌ API versioning chuẩn
+* ❌ Error response JSON đồng nhất
+* ❌ REST HAL / HATEOAS
+
+👉 Phải **chấp nhận và xử lý thủ công**
+
+---
+
+## 8. Kết luận
+
+* DSpace 6.3 **ổn định nhưng cổ điển**
+* Tích hợp cần **kiên nhẫn + hiểu bản chất servlet**
+* Đừng tin bề ngoài là "REST"
+
+> ✔ Khi đã quen, hệ thống chạy rất bền và ít thay đổi
+
+---
+
+📌 Tài liệu này được viết dựa trên **test thực tế**, không chỉ đọc docs.
+Nếu gặp hành vi "lạ", hãy kiểm tra **header + response raw** trước khi kết luận bug.
