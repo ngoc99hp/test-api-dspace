@@ -1,19 +1,23 @@
 "use client"
 import React, { useState, useRef } from 'react';
+import { Plus, X, Trash2, FolderOpen } from 'lucide-react';
 
-export default function DSpaceBatchUploader() {
-  // Lấy DSpace URL từ biến môi trường
-  const dspaceUrl = process.env.NEXT_PUBLIC_DSPACE_URL || 'https://lib.hpu.edu.vn';
+export default function SmartDSpaceUploader() {
+  const dspaceUrl = process.env.NEXT_PUBLIC_DSPACE_URL;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [collectionId, setCollectionId] = useState('');
   const [session, setSession] = useState(null);
-  const [folders, setFolders] = useState([]);
+  const [collections, setCollections] = useState([]);
+  
+  // ✅ Quản lý danh sách folders đã chọn
+  const [selectedFolders, setSelectedFolders] = useState([]);
+  const [mappings, setMappings] = useState([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState([]);
-  const [isProcessing, setIsProcessing] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Login to DSpace
+  // Login
   const handleLogin = async () => {
     try {
       const res = await fetch('/api/dspace/login', {
@@ -29,7 +33,6 @@ export default function DSpaceBatchUploader() {
         return;
       }
 
-      // Check session status (POST method now, with dspaceUrl)
       const statusRes = await fetch('/api/dspace/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -40,7 +43,8 @@ export default function DSpaceBatchUploader() {
 
       if (statusData.authenticated) {
         setSession(statusData);
-        alert('Login successful!');
+        await loadCollections();
+        alert('✅ Login successful!');
       } else {
         alert('Login failed: Not authenticated');
       }
@@ -49,33 +53,27 @@ export default function DSpaceBatchUploader() {
     }
   };
 
-  // Handle folder selection
-  const handleFolderSelect = (e) => {
-    const files = Array.from(e.target.files);
-    
-    // Group files by directory path
-    const folderMap = {};
-    files.forEach(file => {
-      const pathParts = file.webkitRelativePath.split('/');
-      const folderName = pathParts[0];
-      
-      if (!folderMap[folderName]) {
-        folderMap[folderName] = [];
+  // Load all collections
+  const loadCollections = async () => {
+    try {
+      const res = await fetch('/api/dspace/get-collections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ dspaceUrl })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setCollections(data.collections);
+        console.log(`Loaded ${data.collections.length} collections`);
       }
-      folderMap[folderName].push(file);
-    });
-
-    const folderList = Object.entries(folderMap).map(([name, files]) => ({
-      name,
-      files,
-      metadataFile: files.find(f => f.name === 'metadata.json')
-    }));
-
-    setFolders(folderList);
-    setUploadStatus([]);
+    } catch (err) {
+      console.error('Failed to load collections:', err);
+    }
   };
 
-  // Read metadata.json from a file
+  // Read metadata from file
   const readMetadataFile = (file) => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -92,195 +90,330 @@ export default function DSpaceBatchUploader() {
     });
   };
 
-  // Upload a single folder
-  const uploadFolder = async (folder) => {
-    try {
-      // 1. Read metadata.json
-      if (!folder.metadataFile) {
-        throw new Error('metadata.json not found in folder');
-      }
-
-      const metadata = await readMetadataFile(folder.metadataFile);
+  // ✅ Thêm folders vào danh sách (không gọi AI ngay)
+  const handleAddFolders = async (e) => {
+    const files = Array.from(e.target.files);
+    
+    const folderMap = {};
+    files.forEach(file => {
+      const pathParts = file.webkitRelativePath.split('/');
+      const folderName = pathParts[0];
       
-      // Validate metadata format
-      if (!metadata.metadata || !Array.isArray(metadata.metadata)) {
-        throw new Error('Invalid metadata format. Expected { "metadata": [...] }');
+      if (!folderMap[folderName]) {
+        folderMap[folderName] = [];
+      }
+      folderMap[folderName].push(file);
+    });
+
+    const newFolders = await Promise.all(
+      Object.entries(folderMap).map(async ([name, files]) => {
+        const metadataFile = files.find(f => f.name === 'metadata.json');
+        let title = 'N/A';
+        let hasValidMetadata = false;
+
+        if (metadataFile) {
+          try {
+            const metadata = await readMetadataFile(metadataFile);
+            if (metadata.metadata && Array.isArray(metadata.metadata)) {
+              const titleField = metadata.metadata.find(m => m.key === 'dc.title');
+              title = titleField?.value || 'Untitled';
+              hasValidMetadata = true;
+            }
+          } catch (err) {
+            console.error(`Error reading metadata from ${name}:`, err);
+          }
+        }
+
+        return {
+          id: Date.now() + Math.random(), // Unique ID
+          name,
+          title,
+          files,
+          metadataFile,
+          hasValidMetadata,
+          fileCount: files.length
+        };
+      })
+    );
+
+    // ✅ Thêm vào danh sách, không trùng lặp
+    setSelectedFolders(prev => {
+      const existingNames = prev.map(f => f.name);
+      const uniqueNew = newFolders.filter(f => !existingNames.includes(f.name));
+      return [...prev, ...uniqueNew];
+    });
+
+    // Reset file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  // ✅ Xóa folder khỏi danh sách
+  const handleRemoveFolder = (folderId) => {
+    setSelectedFolders(prev => prev.filter(f => f.id !== folderId));
+    setMappings(prev => prev.filter(m => m.folderId !== folderId));
+  };
+
+  // ✅ Xóa tất cả folders
+  const handleClearAll = () => {
+    if (confirm('Remove all selected folders?')) {
+      setSelectedFolders([]);
+      setMappings([]);
+    }
+  };
+
+  // ✅ AI Analysis - CHỈ khi user bấm nút xác nhận
+  const handleAnalyze = async () => {
+    if (selectedFolders.length === 0) {
+      alert('Please select folders first');
+      return;
+    }
+
+    if (collections.length === 0) {
+      alert('No collections loaded. Please login first.');
+      return;
+    }
+
+    const validFolders = selectedFolders.filter(f => f.hasValidMetadata);
+    if (validFolders.length === 0) {
+      alert('No folders with valid metadata.json found');
+      return;
+    }
+
+    if (!confirm(`Analyze ${validFolders.length} folders with AI? (This will use Claude API credits)`)) {
+      return;
+    }
+
+    setIsAnalyzing(true);
+    const newMappings = [];
+
+    for (const folder of selectedFolders) {
+      if (!folder.hasValidMetadata) {
+        newMappings.push({
+          folderId: folder.id,
+          folderName: folder.name,
+          title: folder.title,
+          collectionId: null,
+          collectionName: 'Missing/Invalid metadata.json',
+          confidence: 0,
+          reasoning: 'No valid metadata file found',
+          status: 'error'
+        });
+        continue;
       }
 
-      // 2. Create item
-      const createRes = await fetch('/api/dspace/create-item', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          collectionId,
-          metadata: metadata.metadata,
-          dspaceUrl
-        })
-      });
+      try {
+        const metadata = await readMetadataFile(folder.metadataFile);
 
-      if (!createRes.ok) {
-        const error = await createRes.json();
-        throw new Error(error.error || 'Failed to create item');
+        // ✅ Call AI (API key từ .env)
+        const res = await fetch('/api/ai/suggest-collection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            metadata: metadata.metadata,
+            collections
+          })
+        });
+
+        if (!res.ok) {
+          throw new Error('AI suggestion failed');
+        }
+
+        const data = await res.json();
+        const suggestion = data.suggestion;
+
+        newMappings.push({
+          folderId: folder.id,
+          folderName: folder.name,
+          title: folder.title,
+          collectionId: suggestion.collectionId,
+          collectionName: suggestion.collectionName,
+          confidence: suggestion.confidence,
+          reasoning: suggestion.reasoning,
+          alternativeIds: suggestion.alternativeIds || [],
+          status: 'ready',
+          metadata: metadata.metadata
+        });
+
+      } catch (err) {
+        console.error(`Error analyzing ${folder.name}:`, err);
+        newMappings.push({
+          folderId: folder.id,
+          folderName: folder.name,
+          title: folder.title,
+          collectionId: null,
+          collectionName: 'Analysis failed',
+          confidence: 0,
+          reasoning: err.message,
+          status: 'error'
+        });
       }
+    }
 
-      const itemData = await createRes.json();
-      const itemId = itemData.id;
+    setMappings(newMappings);
+    setIsAnalyzing(false);
+  };
 
-      // 3. Upload bitstreams (all files except metadata.json)
-      const bitstreamFiles = folder.files.filter(f => f.name !== 'metadata.json');
-      const uploadedBitstreams = [];
+  // Upload to DSpace
+  const handleUpload = async () => {
+    const readyMappings = mappings.filter(m => m.status === 'ready' && m.collectionId);
+    
+    if (readyMappings.length === 0) {
+      alert('No items ready to upload');
+      return;
+    }
 
-      for (const file of bitstreamFiles) {
-        console.log('Uploading file:', file.name, 'Size:', file.size);
-        
-        try {
-          // Đọc file thành ArrayBuffer
+    if (!confirm(`Upload ${readyMappings.length} items to DSpace?`)) {
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadStatus([]);
+
+    for (let i = 0; i < readyMappings.length; i++) {
+      const mapping = readyMappings[i];
+      const folder = selectedFolders.find(f => f.id === mapping.folderId);
+
+      setUploadStatus(prev => [
+        ...prev,
+        { folderName: mapping.folderName, status: 'Uploading...', success: null }
+      ]);
+
+      try {
+        // Create item
+        const createRes = await fetch('/api/dspace/create-item', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            collectionId: mapping.collectionId,
+            metadata: mapping.metadata,
+            dspaceUrl
+          })
+        });
+
+        if (!createRes.ok) {
+          throw new Error('Failed to create item');
+        }
+
+        const itemData = await createRes.json();
+        let itemId = itemData.itemId;
+
+        if (!itemId && itemData.handle) {
+          const handleRes = await fetch('/api/dspace/get-item-by-handle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ handle: itemData.handle, dspaceUrl })
+          });
+
+          if (handleRes.ok) {
+            const handleData = await handleRes.json();
+            itemId = handleData.id;
+          }
+        }
+
+        if (!itemId) {
+          throw new Error('Could not get item ID');
+        }
+
+        // Upload bitstreams
+        const bitstreamFiles = folder.files.filter(f => f.name !== 'metadata.json');
+        let uploadedCount = 0;
+
+        for (const file of bitstreamFiles) {
           const fileData = await file.arrayBuffer();
-          console.log('File data read, size:', fileData.byteLength);
-          
-          // Gửi RAW BINARY đến API route với params trong URL
-          const uploadUrl = `/api/dspace/upload-bitstream?itemId=${itemId}&fileName=${encodeURIComponent(file.name)}&dspaceUrl=${encodeURIComponent(dspaceUrl)}`;
-          console.log('Upload URL:', uploadUrl);
+          const uploadUrl = `/api/dspace/upload-bitstream?itemId=${encodeURIComponent(itemId)}&fileName=${encodeURIComponent(file.name)}&dspaceUrl=${encodeURIComponent(dspaceUrl)}`;
           
           const bitstreamRes = await fetch(uploadUrl, {
             method: 'POST',
             credentials: 'include',
-            headers: {
-              'Content-Type': 'application/octet-stream'
-            },
-            body: fileData // RAW binary data
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: fileData
           });
 
-          console.log('Response status:', bitstreamRes.status);
-          
-          if (!bitstreamRes.ok) {
-            const errorText = await bitstreamRes.text();
-            console.error('Upload failed:', errorText);
-            
-            let error;
-            try {
-              error = JSON.parse(errorText);
-            } catch (e) {
-              error = { error: errorText };
-            }
-            
-            throw new Error(error.error || error.message || `Failed to upload ${file.name}`);
+          if (bitstreamRes.ok) {
+            uploadedCount++;
           }
-
-          const bitstreamData = await bitstreamRes.json();
-          console.log('Upload success:', bitstreamData);
-          uploadedBitstreams.push(bitstreamData);
-        } catch (err) {
-          console.error('Error uploading', file.name, ':', err);
-          throw new Error(`Failed to upload ${file.name}: ${err.message}`);
         }
-      }
 
-      return {
-        success: true,
-        itemId,
-        bitstreamCount: uploadedBitstreams.length,
-        handle: itemData.handle || 'Pending'
-      };
-    } catch (err) {
-      return {
-        success: false,
-        error: err.message
-      };
+        setUploadStatus(prev => {
+          const updated = [...prev];
+          updated[i] = {
+            folderName: mapping.folderName,
+            status: `✅ Success! ID: ${itemId}, Files: ${uploadedCount}, Handle: ${itemData.handle || 'Pending'}`,
+            success: true
+          };
+          return updated;
+        });
+
+      } catch (err) {
+        setUploadStatus(prev => {
+          const updated = [...prev];
+          updated[i] = {
+            folderName: mapping.folderName,
+            status: `❌ Failed: ${err.message}`,
+            success: false
+          };
+          return updated;
+        });
+      }
     }
+
+    setIsUploading(false);
+    alert('Upload complete!');
   };
 
-  // Push all folders to DSpace
-  const handlePushToDSpace = async () => {
-    if (!session?.authenticated) {
-      alert('Please login first');
-      return;
-    }
+  const getConfidenceColor = (confidence) => {
+    if (confidence >= 80) return 'text-green-600';
+    if (confidence >= 60) return 'text-yellow-600';
+    return 'text-red-600';
+  };
 
-    if (!collectionId) {
-      alert('Please enter Collection ID');
-      return;
-    }
-
-    if (folders.length === 0) {
-      alert('Please select folders');
-      return;
-    }
-
-    setIsProcessing(true);
-    setUploadStatus([]);
-
-    for (let i = 0; i < folders.length; i++) {
-      const folder = folders[i];
-      
-      setUploadStatus(prev => [
-        ...prev,
-        { folderName: folder.name, status: 'Processing...', success: null }
-      ]);
-
-      const result = await uploadFolder(folder);
-
-      setUploadStatus(prev => {
-        const updated = [...prev];
-        updated[i] = {
-          folderName: folder.name,
-          status: result.success 
-            ? `Success! Item ID: ${result.itemId}, Bitstreams: ${result.bitstreamCount}, Handle: ${result.handle}`
-            : `Failed: ${result.error}`,
-          success: result.success
-        };
-        return updated;
-      });
-    }
-
-    setIsProcessing(false);
-    alert('Processing complete!');
+  const getConfidenceBadge = (confidence) => {
+    if (confidence >= 80) return '🟢 High';
+    if (confidence >= 60) return '🟡 Medium';
+    return '🔴 Low';
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-5xl mx-auto">
-        <h1 className="text-3xl font-bold text-gray-900 mb-8">
-          DSpace 6.3 Batch Document Uploader
-        </h1>
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-8">
+      <div className="max-w-7xl mx-auto">
+        <div className="text-center mb-8">
+          <h1 className="text-4xl font-bold text-gray-900 mb-2">
+            🤖 Smart DSpace Uploader
+          </h1>
+          <p className="text-gray-600">AI-Powered Collection Auto-Mapping</p>
+        </div>
 
-        {/* Login Form */}
+        {/* Login */}
         {!session?.authenticated && (
-          <div className="bg-white rounded-lg shadow-md p-6 mb-8">
-            <h2 className="text-xl font-semibold mb-4">Login to DSpace</h2>
+          <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <h2 className="text-xl font-semibold mb-4">🔐 Login to DSpace</h2>
             <div className="space-y-4">
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
                 <p className="text-sm text-blue-800">
-                  <span className="font-semibold">DSpace Server:</span> {dspaceUrl}
+                  <span className="font-semibold">Server:</span> {dspaceUrl}
                 </p>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Email
-                </label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="admin@dspace.org"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Email"
+                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+              />
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+              />
               <button
                 onClick={handleLogin}
-                className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors font-medium"
+                className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium"
               >
                 Login
               </button>
@@ -290,121 +423,210 @@ export default function DSpaceBatchUploader() {
 
         {/* Session Info */}
         {session?.authenticated && (
-          <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-8">
-            <h3 className="text-green-800 font-semibold mb-2">
-              ✓ Logged in as {session.fullname}
-            </h3>
-            <p className="text-green-700 text-sm">Email: {session.email}</p>
-            <p className="text-green-700 text-sm">DSpace Version: {session.sourceVersion}</p>
+          <div className="bg-green-50 border-2 border-green-200 rounded-xl p-4 mb-8">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-green-800 font-semibold">
+                  ✓ Logged in as {session.fullname}
+                </h3>
+                <p className="text-green-700 text-sm">
+                  {collections.length} collections available
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-green-700 text-sm">{session.email}</p>
+                <p className="text-green-600 text-xs">DSpace {session.sourceVersion}</p>
+              </div>
+            </div>
           </div>
         )}
 
-        {/* Upload Section */}
+        {/* Folder Selection */}
         {session?.authenticated && (
           <>
-            <div className="bg-white rounded-lg shadow-md p-6 mb-8">
-              <h2 className="text-xl font-semibold mb-4">Upload Configuration</h2>
-              
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Collection ID (Required)
-                </label>
-                <input
-                  type="text"
-                  value={collectionId}
-                  onChange={(e) => setCollectionId(e.target.value)}
-                  placeholder="e.g., 123 or uuid-string"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Find this in DSpace admin interface or via /rest/collections
-                </p>
-              </div>
+            <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+              <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
+                <FolderOpen className="w-5 h-5" />
+                Folder Selection
+              </h2>
 
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Select Folders
-                </label>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  webkitdirectory=""
-                  multiple
-                  onChange={handleFolderSelect}
-                  className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Each folder must contain a metadata.json file
-                </p>
-              </div>
-
-              {folders.length > 0 && (
-                <div className="mb-4">
-                  <h3 className="text-sm font-medium text-gray-700 mb-2">
-                    Selected Folders ({folders.length})
-                  </h3>
-                  <ul className="space-y-1 text-sm text-gray-600">
-                    {folders.map((folder, idx) => (
-                      <li key={idx} className="flex items-center">
-                        <span className="mr-2">
-                          {folder.metadataFile ? '✓' : '✗'}
-                        </span>
-                        <span className="font-medium">{folder.name}</span>
-                        <span className="ml-2 text-gray-400">
-                          ({folder.files.length} files)
-                        </span>
-                        {!folder.metadataFile && (
-                          <span className="ml-2 text-red-600 text-xs">
-                            Missing metadata.json
-                          </span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
+              <div className="space-y-4">
+                {/* Add Folders Button */}
+                <div className="flex gap-3">
+                  <label className="flex-1 cursor-pointer">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      webkitdirectory=""
+                      multiple
+                      onChange={handleAddFolders}
+                      className="hidden"
+                    />
+                    <div className="flex items-center justify-center gap-2 px-4 py-3 bg-blue-50 text-blue-700 rounded-lg border-2 border-blue-200 hover:bg-blue-100 font-medium">
+                      <Plus className="w-5 h-5" />
+                      Add Folders
+                    </div>
+                  </label>
+                  
+                  {selectedFolders.length > 0 && (
+                    <button
+                      onClick={handleClearAll}
+                      className="px-4 py-3 bg-red-50 text-red-700 rounded-lg border-2 border-red-200 hover:bg-red-100 font-medium flex items-center gap-2"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Clear All
+                    </button>
+                  )}
                 </div>
-              )}
 
-              <button
-                onClick={handlePushToDSpace}
-                disabled={isProcessing || folders.length === 0 || !collectionId}
-                className="w-full bg-green-600 text-white py-3 px-4 rounded-md hover:bg-green-700 transition-colors font-medium disabled:bg-gray-400 disabled:cursor-not-allowed"
-              >
-                {isProcessing ? 'Processing...' : 'Push to DSpace'}
-              </button>
+                {/* Selected Folders List */}
+                {selectedFolders.length > 0 && (
+                  <div className="border rounded-lg overflow-hidden">
+                    <div className="bg-gray-50 px-4 py-2 border-b flex items-center justify-between">
+                      <span className="font-medium text-gray-700">
+                        Selected Folders ({selectedFolders.length})
+                      </span>
+                    </div>
+                    <div className="max-h-96 overflow-y-auto">
+                      {selectedFolders.map((folder) => (
+                        <div
+                          key={folder.id}
+                          className="flex items-center justify-between px-4 py-3 border-b hover:bg-gray-50"
+                        >
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg">
+                                {folder.hasValidMetadata ? '✅' : '❌'}
+                              </span>
+                              <div>
+                                <p className="font-medium text-gray-900">{folder.title}</p>
+                                <p className="text-xs text-gray-500">
+                                  {folder.name} • {folder.fileCount} files
+                                </p>
+                              </div>
+                            </div>
+                            {!folder.hasValidMetadata && (
+                              <p className="text-xs text-red-600 mt-1 ml-7">
+                                Missing or invalid metadata.json
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => handleRemoveFolder(folder.id)}
+                            className="p-2 text-red-600 hover:bg-red-50 rounded-lg"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Analyze Button */}
+                {selectedFolders.length > 0 && (
+                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                    <p className="text-sm text-purple-800 mb-3">
+                      ⚠️ AI analysis will use Claude API credits. Make sure you've selected all desired folders before analyzing.
+                    </p>
+                    <button
+                      onClick={handleAnalyze}
+                      disabled={isAnalyzing}
+                      className="w-full bg-purple-600 text-white py-3 rounded-lg hover:bg-purple-700 font-medium disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    >
+                      {isAnalyzing ? '🤖 AI Analyzing...' : `🤖 Analyze ${selectedFolders.filter(f => f.hasValidMetadata).length} Folders with AI`}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
+
+            {/* Mappings Table */}
+            {mappings.length > 0 && (
+              <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+                <h2 className="text-xl font-semibold mb-4">📊 AI Suggestions</h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Suggested Collection</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Confidence</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reasoning</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {mappings.map((mapping, idx) => (
+                        <tr key={mapping.folderId} className={mapping.status === 'error' ? 'bg-red-50' : ''}>
+                          <td className="px-4 py-3 text-sm text-gray-500">{idx + 1}</td>
+                          <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                            {mapping.title}
+                            <div className="text-xs text-gray-500">{mapping.folderName}</div>
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            {mapping.status === 'error' ? (
+                              <span className="text-red-600">{mapping.collectionName}</span>
+                            ) : (
+                              <select
+                                value={mapping.collectionId}
+                                onChange={(e) => {
+                                  const newMappings = [...mappings];
+                                  const col = collections.find(c => c.id === e.target.value || c.uuid === e.target.value);
+                                  const idx = newMappings.findIndex(m => m.folderId === mapping.folderId);
+                                  newMappings[idx].collectionId = e.target.value;
+                                  newMappings[idx].collectionName = col?.name || '';
+                                  setMappings(newMappings);
+                                }}
+                                className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                              >
+                                {collections.map(col => (
+                                  <option key={col.id || col.uuid} value={col.id || col.uuid}>
+                                    {col.name}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            <span className={`font-semibold ${getConfidenceColor(mapping.confidence)}`}>
+                              {getConfidenceBadge(mapping.confidence)}
+                            </span>
+                            <div className="text-xs text-gray-500">{mapping.confidence}%</div>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {mapping.reasoning}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <button
+                  onClick={handleUpload}
+                  disabled={isUploading || mappings.filter(m => m.status === 'ready').length === 0}
+                  className="w-full mt-6 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 font-medium disabled:bg-gray-400"
+                >
+                  {isUploading ? '⏳ Uploading...' : '🚀 Push to DSpace'}
+                </button>
+              </div>
+            )}
 
             {/* Upload Status */}
             {uploadStatus.length > 0 && (
-              <div className="bg-white rounded-lg shadow-md p-6">
-                <h2 className="text-xl font-semibold mb-4">Upload Status</h2>
-                <div className="space-y-3">
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <h2 className="text-xl font-semibold mb-4">📈 Upload Status</h2>
+                <div className="space-y-2">
                   {uploadStatus.map((status, idx) => (
                     <div
                       key={idx}
-                      className={`p-4 rounded-md ${
-                        status.success === null
-                          ? 'bg-blue-50 border border-blue-200'
-                          : status.success
-                          ? 'bg-green-50 border border-green-200'
-                          : 'bg-red-50 border border-red-200'
+                      className={`p-4 rounded-lg ${
+                        status.success === null ? 'bg-blue-50' :
+                        status.success ? 'bg-green-50' : 'bg-red-50'
                       }`}
                     >
-                      <div className="flex items-start">
-                        <span className="font-semibold mr-2">
-                          {status.folderName}:
-                        </span>
-                        <span
-                          className={`flex-1 ${
-                            status.success === null
-                              ? 'text-blue-700'
-                              : status.success
-                              ? 'text-green-700'
-                              : 'text-red-700'
-                          }`}
-                        >
-                          {status.status}
-                        </span>
-                      </div>
+                      <span className="font-semibold">{status.folderName}:</span> {status.status}
                     </div>
                   ))}
                 </div>
@@ -412,44 +634,6 @@ export default function DSpaceBatchUploader() {
             )}
           </>
         )}
-
-        {/* Instructions */}
-        <div className="mt-8 bg-blue-50 border border-blue-200 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-blue-900 mb-3">
-            📋 Instructions
-          </h3>
-          <ol className="list-decimal list-inside space-y-2 text-blue-900 text-sm">
-            <li>Login with your DSpace credentials</li>
-            <li>Enter the target Collection ID</li>
-            <li>
-              Prepare folders with documents. Each folder must contain:
-              <ul className="list-disc list-inside ml-6 mt-1 text-blue-800">
-                <li><code className="bg-blue-100 px-1 rounded">metadata.json</code> - DSpace metadata</li>
-                <li>Document files (PDF, images, etc.)</li>
-              </ul>
-            </li>
-            <li>Select folders using the folder picker</li>
-            <li>Click "Push to DSpace" to start upload</li>
-          </ol>
-          
-          <div className="mt-4 p-3 bg-blue-100 rounded">
-            <p className="text-sm font-semibold text-blue-900 mb-1">
-              Example metadata.json format:
-            </p>
-            <pre className="text-xs text-blue-900 overflow-x-auto">
-{`{
-  "metadata": [
-    { "key": "dc.title", "value": "Document Title", "language": null },
-    { "key": "dc.contributor.author", "value": "Author Name", "language": null },
-    { "key": "dc.date.issued", "value": "2024", "language": null },
-    { "key": "dc.description.abstract", "value": "Abstract text", "language": "en" },
-    { "key": "dc.language.iso", "value": "en", "language": null },
-    { "key": "dc.type", "value": "Text", "language": null }
-  ]
-}`}
-            </pre>
-          </div>
-        </div>
       </div>
     </div>
   );

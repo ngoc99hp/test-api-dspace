@@ -8,12 +8,22 @@ function parseXMLItemResponse(xmlText) {
   try {
     // Extract key fields from XML using regex (simple parser for DSpace XML)
     const idMatch = xmlText.match(/<id>(\d+)<\/id>/);
+    const uuidMatch = xmlText.match(/<uuid>([a-f0-9-]+)<\/uuid>/);
     const handleMatch = xmlText.match(/<handle>([^<]+)<\/handle>/);
     const nameMatch = xmlText.match(/<name>([^<]+)<\/name>/);
     const archivedMatch = xmlText.match(/<archived>([^<]+)<\/archived>/);
+    // Extract UUID from link like /rest/items/335530b9-ed0e-4616-b81b-25cd3f14f9e9
+    const linkMatch = xmlText.match(/<link>\/rest\/items\/([a-f0-9-]+)<\/link>/);
+
+    // DSpace 6.3 uses UUID as primary identifier
+    const itemUuid = uuidMatch ? uuidMatch[1] : (linkMatch ? linkMatch[1] : null);
+    const itemId = idMatch ? parseInt(idMatch[1]) : null;
 
     return {
-      id: idMatch ? parseInt(idMatch[1]) : null,
+      id: itemId,
+      uuid: itemUuid,
+      // Use UUID as primary ID if available, fallback to numeric ID
+      itemId: itemUuid || itemId,
       handle: handleMatch ? handleMatch[1] : null,
       name: nameMatch ? nameMatch[1] : null,
       archived: archivedMatch ? archivedMatch[1] : "false",
@@ -63,6 +73,8 @@ export async function POST(req) {
       }))
     };
 
+    console.log('Creating item with metadata:', JSON.stringify(payload, null, 2));
+
     // POST to DSpace create item endpoint
     const res = await fetch(
       `${dspaceUrl}/rest/collections/${collectionId}/items`,
@@ -72,7 +84,6 @@ export async function POST(req) {
           "Content-Type": "application/json",
           Cookie: cookie,
           Accept: "application/json",
-          // Add User-Agent to help with content negotiation
           "User-Agent": "PostmanRuntime/7.x",
         },
         body: JSON.stringify(payload),
@@ -81,6 +92,7 @@ export async function POST(req) {
 
     // Always read as text first (DSpace may return XML)
     const responseText = await res.text();
+    console.log('Create item response:', responseText.substring(0, 500));
 
     if (!res.ok) {
       return NextResponse.json(
@@ -102,11 +114,11 @@ export async function POST(req) {
       console.log("DSpace returned XML response");
       itemData = parseXMLItemResponse(responseText);
       
-      if (!itemData || !itemData.id) {
+      if (!itemData) {
         return NextResponse.json(
           {
             error: "Failed to parse XML response",
-            raw: responseText,
+            raw: responseText.substring(0, 1000),
           },
           { status: 500 }
         );
@@ -115,6 +127,21 @@ export async function POST(req) {
       // JSON response
       try {
         itemData = JSON.parse(responseText);
+        
+        // Extract UUID from link field if present
+        // Example: "link": "/rest/items/335530b9-ed0e-4616-b81b-25cd3f14f9e9"
+        let itemUuid = null;
+        if (itemData.link) {
+          const uuidMatch = itemData.link.match(/\/items\/([a-f0-9-]+)/);
+          if (uuidMatch) {
+            itemUuid = uuidMatch[1];
+          }
+        }
+        
+        // Use UUID as primary identifier, fallback to id
+        itemData.itemId = itemUuid || itemData.uuid || itemData.id;
+        itemData.uuid = itemUuid || itemData.uuid;
+        
       } catch (err) {
         return NextResponse.json(
           {
@@ -135,15 +162,55 @@ export async function POST(req) {
       );
     }
 
+    console.log('Parsed item data:', {
+      itemId: itemData.itemId,
+      id: itemData.id,
+      uuid: itemData.uuid,
+      handle: itemData.handle
+    });
+
+    // ⚠️ Nếu không có itemId/uuid, cần gọi GET item by handle
+    if (!itemData.itemId && itemData.handle) {
+      console.log('No itemId in response, fetching by handle:', itemData.handle);
+      
+      try {
+        const handleUrl = `${dspaceUrl}/rest/handle/${itemData.handle}`;
+        const handleRes = await fetch(handleUrl, {
+          headers: {
+            Cookie: cookie,
+            Accept: "application/json",
+          },
+        });
+
+        if (handleRes.ok) {
+          const handleText = await handleRes.text();
+          const handleTrimmed = handleText.trim();
+          
+          if (handleTrimmed.startsWith("{")) {
+            const handleData = JSON.parse(handleText);
+            itemData.itemId = handleData.uuid || handleData.id;
+            itemData.id = handleData.id;
+            itemData.uuid = handleData.uuid;
+            console.log('Got itemId from handle lookup:', itemData.itemId);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to lookup item by handle:', err);
+      }
+    }
+
     // Return normalized item data
     return NextResponse.json({
       success: true,
-      id: itemData.id,
+      itemId: itemData.itemId || null,  // Main ID to use for bitstream upload
+      id: itemData.id || null,          // Numeric ID (may be null)
+      uuid: itemData.uuid || null,      // UUID (preferred for DSpace 6.3)
       handle: itemData.handle || null,
       name: itemData.name || null,
       archived: itemData.archived || "false",
       message: "Item created successfully",
       _format: trimmed.startsWith("<") ? "xml" : "json",
+      _needsHandleLookup: !itemData.itemId && !!itemData.handle, // Flag for client
     });
 
   } catch (err) {
