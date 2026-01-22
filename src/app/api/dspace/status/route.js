@@ -1,11 +1,13 @@
+// File: src/app/api/dspace/status/route.js
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-export async function GET(req) {
+export async function POST(req) {
   const cookie = req.headers.get("cookie");
+  const { dspaceUrl } = await req.json();
 
-  const res = await fetch("https://lib.hpu.edu.vn/rest/status", {
+  const res = await fetch(`${dspaceUrl}/rest/status`, {
     headers: {
       Cookie: cookie,
       Accept: "application/json",

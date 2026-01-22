@@ -1,16 +1,19 @@
+// File: src/app/api/dspace/login/route.js
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
 export async function POST(req) {
   try {
-    const { email, password } = await req.json();
+    const { email, password, dspaceUrl } = await req.json();
 
+    // Build form-urlencoded body as per DSpace 6.3 REST API spec
     const body = new URLSearchParams();
     body.append("email", email);
     body.append("password", password);
 
-    const res = await fetch("https://lib.hpu.edu.vn/rest/login", {
+    // POST to DSpace login endpoint
+    const res = await fetch(`${dspaceUrl}/rest/login`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
