@@ -1,59 +1,26 @@
 "use client"
-import React, { useState, useRef } from 'react';
-import { Plus, X, Trash2, FolderOpen } from 'lucide-react';
+
+import React, { useState } from 'react';
+import LoginForm from '../components/LoginForm';
+import FolderSelector from '../components/FolderSelector';
+import MappingsTable from '../components/MappingsTable';
+import UploadStatus from '../components/UploadStatus';
+import { ToastContainer } from '../components/Toast';
+import { useToast } from '../hooks/useToast';
 
 export default function SmartDSpaceUploader() {
   const dspaceUrl = process.env.NEXT_PUBLIC_DSPACE_URL;
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const { toasts, removeToast, success, error, warning, info } = useToast();
+  
   const [session, setSession] = useState(null);
   const [collections, setCollections] = useState([]);
-  
-  // ✅ Quản lý danh sách folders đã chọn
   const [selectedFolders, setSelectedFolders] = useState([]);
   const [mappings, setMappings] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState([]);
-  const fileInputRef = useRef(null);
 
-  // Login
-  const handleLogin = async () => {
-    try {
-      const res = await fetch('/api/dspace/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ email, password, dspaceUrl })
-      });
-
-      if (!res.ok) {
-        const error = await res.json();
-        alert('Login failed: ' + (error.error || 'Unknown error'));
-        return;
-      }
-
-      const statusRes = await fetch('/api/dspace/status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ dspaceUrl })
-      });
-      const statusData = await statusRes.json();
-
-      if (statusData.authenticated) {
-        setSession(statusData);
-        await loadCollections();
-        alert('✅ Login successful!');
-      } else {
-        alert('Login failed: Not authenticated');
-      }
-    } catch (err) {
-      alert('Login error: ' + err.message);
-    }
-  };
-
-  // Load all collections
+  // Load collections after login
   const loadCollections = async () => {
     try {
       const res = await fetch('/api/dspace/get-collections', {
@@ -67,10 +34,18 @@ export default function SmartDSpaceUploader() {
         const data = await res.json();
         setCollections(data.collections);
         console.log(`Loaded ${data.collections.length} collections`);
+      } else {
+        warning('Failed to load collections');
       }
     } catch (err) {
-      console.error('Failed to load collections:', err);
+      error(`Failed to load collections: ${err.message}`);
     }
+  };
+
+  // Handle login success
+  const handleLoginSuccess = async (sessionData) => {
+    setSession(sessionData);
+    await loadCollections();
   };
 
   // Read metadata from file
@@ -90,7 +65,7 @@ export default function SmartDSpaceUploader() {
     });
   };
 
-  // ✅ Thêm folders vào danh sách (không gọi AI ngay)
+  // Add folders
   const handleAddFolders = async (e) => {
     const files = Array.from(e.target.files);
     
@@ -116,7 +91,7 @@ export default function SmartDSpaceUploader() {
             const metadata = await readMetadataFile(metadataFile);
             if (metadata.metadata && Array.isArray(metadata.metadata)) {
               const titleField = metadata.metadata.find(m => m.key === 'dc.title');
-              title = titleField?.value || 'Untitled';
+              title = titleField?.value ?? 'Untitled';
               hasValidMetadata = true;
             }
           } catch (err) {
@@ -125,7 +100,7 @@ export default function SmartDSpaceUploader() {
         }
 
         return {
-          id: Date.now() + Math.random(), // Unique ID
+          id: Date.now() + Math.random(),
           name,
           title,
           files,
@@ -136,108 +111,145 @@ export default function SmartDSpaceUploader() {
       })
     );
 
-    // ✅ Thêm vào danh sách, không trùng lặp
     setSelectedFolders(prev => {
       const existingNames = prev.map(f => f.name);
       const uniqueNew = newFolders.filter(f => !existingNames.includes(f.name));
+      if (uniqueNew.length > 0) {
+        info(`Added ${uniqueNew.length} folders`);
+      } else {
+        warning('All selected folders already added');
+      }
       return [...prev, ...uniqueNew];
     });
-
-    // Reset file input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
   };
 
-  // ✅ Xóa folder khỏi danh sách
+  // Remove folder
   const handleRemoveFolder = (folderId) => {
     setSelectedFolders(prev => prev.filter(f => f.id !== folderId));
     setMappings(prev => prev.filter(m => m.folderId !== folderId));
+    info('Folder removed');
   };
 
-  // ✅ Xóa tất cả folders
+  // Clear all folders
   const handleClearAll = () => {
-    if (confirm('Remove all selected folders?')) {
-      setSelectedFolders([]);
-      setMappings([]);
-    }
+    setSelectedFolders([]);
+    setMappings([]);
+    info('All folders cleared');
   };
 
-  // ✅ AI Analysis - CHỈ khi user bấm nút xác nhận
+  // AI Analysis
   const handleAnalyze = async () => {
     if (selectedFolders.length === 0) {
-      alert('Please select folders first');
+      warning('Please select folders first');
       return;
     }
 
     if (collections.length === 0) {
-      alert('No collections loaded. Please login first.');
+      warning('No collections loaded. Please login first.');
       return;
     }
 
     const validFolders = selectedFolders.filter(f => f.hasValidMetadata);
     if (validFolders.length === 0) {
-      alert('No folders with valid metadata.json found');
-      return;
-    }
-
-    if (!confirm(`Analyze ${validFolders.length} folders with AI? (This will use Claude API credits)`)) {
+      warning('No folders with valid metadata.json found');
       return;
     }
 
     setIsAnalyzing(true);
+    info(`Analyzing ${validFolders.length} folders...`);
     const newMappings = [];
 
-    for (const folder of selectedFolders) {
-      if (!folder.hasValidMetadata) {
-        newMappings.push({
-          folderId: folder.id,
-          folderName: folder.name,
-          title: folder.title,
-          collectionId: null,
-          collectionName: 'Missing/Invalid metadata.json',
-          confidence: 0,
-          reasoning: 'No valid metadata file found',
-          status: 'error'
-        });
-        continue;
-      }
-
-      try {
+    try {
+      // Prepare documents for batch analysis
+      const documents = [];
+      
+      for (const folder of validFolders) {
         const metadata = await readMetadataFile(folder.metadataFile);
-
-        // ✅ Call AI (API key từ .env)
-        const res = await fetch('/api/ai/suggest-collection', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            metadata: metadata.metadata,
-            collections
-          })
-        });
-
-        if (!res.ok) {
-          throw new Error('AI suggestion failed');
-        }
-
-        const data = await res.json();
-        const suggestion = data.suggestion;
-
-        newMappings.push({
+        documents.push({
           folderId: folder.id,
           folderName: folder.name,
           title: folder.title,
-          collectionId: suggestion.collectionId,
-          collectionName: suggestion.collectionName,
-          confidence: suggestion.confidence,
-          reasoning: suggestion.reasoning,
-          alternativeIds: suggestion.alternativeIds || [],
-          status: 'ready',
           metadata: metadata.metadata
         });
+      }
 
-      } catch (err) {
-        console.error(`Error analyzing ${folder.name}:`, err);
+      console.log(`🚀 Sending ${documents.length} documents in single API call...`);
+
+      // Single batch API call for ALL documents
+      const res = await fetch('/api/ai/suggest-collection-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documents,
+          collections
+        })
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: 'Unknown error' }));
+        console.error('Batch API error:', errorData);
+        throw new Error(errorData.error ?? `Batch AI failed with status ${res.status}`);
+      }
+
+      const data = await res.json();
+      console.log(`✅ Received ${data.suggestions.length} suggestions`);
+
+      // Map suggestions to folders
+      for (let i = 0; i < documents.length; i++) {
+        const doc = documents[i];
+        const suggestion = data.suggestions.find(s => s.folderName === doc.folderName) 
+                        ?? data.suggestions[i];
+
+        if (suggestion) {
+          newMappings.push({
+            folderId: doc.folderId,
+            folderName: doc.folderName,
+            title: doc.title,
+            collectionId: suggestion.collectionId,
+            collectionName: suggestion.collectionName,
+            confidence: suggestion.confidence,
+            reasoning: suggestion.reasoning,
+            status: 'ready',
+            metadata: doc.metadata
+          });
+        } else {
+          newMappings.push({
+            folderId: doc.folderId,
+            folderName: doc.folderName,
+            title: doc.title,
+            collectionId: null,
+            collectionName: 'No suggestion returned',
+            confidence: 0,
+            reasoning: 'AI did not provide suggestion for this document',
+            status: 'error'
+          });
+        }
+      }
+
+      // Add error entries for folders without valid metadata
+      for (const folder of selectedFolders) {
+        if (!folder.hasValidMetadata) {
+          newMappings.push({
+            folderId: folder.id,
+            folderName: folder.name,
+            title: folder.title,
+            collectionId: null,
+            collectionName: 'Missing/Invalid metadata.json',
+            confidence: 0,
+            reasoning: 'No valid metadata file found',
+            status: 'error'
+          });
+        }
+      }
+
+      success(`Analysis complete! ${data.suggestions.length} suggestions ready`);
+
+    } catch (err) {
+      console.error('Batch analysis error:', err);
+      error(`Analysis failed: ${err.message}`);
+      
+      // Fallback: Mark all as errors
+      for (const folder of selectedFolders) {
         newMappings.push({
           folderId: folder.id,
           folderName: folder.name,
@@ -255,21 +267,31 @@ export default function SmartDSpaceUploader() {
     setIsAnalyzing(false);
   };
 
+  // Update mapping
+  const handleUpdateMapping = (folderId, collectionId, collectionName) => {
+    setMappings(prev => {
+      const updated = [...prev];
+      const idx = updated.findIndex(m => m.folderId === folderId);
+      if (idx !== -1) {
+        updated[idx].collectionId = collectionId;
+        updated[idx].collectionName = collectionName;
+      }
+      return updated;
+    });
+  };
+
   // Upload to DSpace
   const handleUpload = async () => {
     const readyMappings = mappings.filter(m => m.status === 'ready' && m.collectionId);
     
     if (readyMappings.length === 0) {
-      alert('No items ready to upload');
-      return;
-    }
-
-    if (!confirm(`Upload ${readyMappings.length} items to DSpace?`)) {
+      warning('No items ready to upload');
       return;
     }
 
     setIsUploading(true);
     setUploadStatus([]);
+    info(`Starting upload of ${readyMappings.length} items...`);
 
     for (let i = 0; i < readyMappings.length; i++) {
       const mapping = readyMappings[i];
@@ -342,7 +364,7 @@ export default function SmartDSpaceUploader() {
           const updated = [...prev];
           updated[i] = {
             folderName: mapping.folderName,
-            status: `✅ Success! ID: ${itemId}, Files: ${uploadedCount}, Handle: ${itemData.handle || 'Pending'}`,
+            status: `✅ Success! ID: ${itemId}, Files: ${uploadedCount}, Handle: ${itemData.handle ?? 'Pending'}`,
             success: true
           };
           return updated;
@@ -362,23 +384,13 @@ export default function SmartDSpaceUploader() {
     }
 
     setIsUploading(false);
-    alert('Upload complete!');
-  };
-
-  const getConfidenceColor = (confidence) => {
-    if (confidence >= 80) return 'text-green-600';
-    if (confidence >= 60) return 'text-yellow-600';
-    return 'text-red-600';
-  };
-
-  const getConfidenceBadge = (confidence) => {
-    if (confidence >= 80) return '🟢 High';
-    if (confidence >= 60) return '🟡 Medium';
-    return '🔴 Low';
+    success('Upload complete!');
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-8">
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
+      
       <div className="max-w-7xl mx-auto">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-900 mb-2">
@@ -387,38 +399,18 @@ export default function SmartDSpaceUploader() {
           <p className="text-gray-600">AI-Powered Collection Auto-Mapping</p>
         </div>
 
-        {/* Login */}
+        {/* Login Form */}
         {!session?.authenticated && (
-          <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
-            <h2 className="text-xl font-semibold mb-4">🔐 Login to DSpace</h2>
-            <div className="space-y-4">
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <p className="text-sm text-blue-800">
-                  <span className="font-semibold">Server:</span> {dspaceUrl}
-                </p>
-              </div>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="Email"
-                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-              />
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                onClick={handleLogin}
-                className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium"
-              >
-                Login
-              </button>
-            </div>
-          </div>
+          <LoginForm 
+            dspaceUrl={dspaceUrl}
+            onLoginSuccess={handleLoginSuccess}
+            showToast={(msg, type) => {
+              if (type === 'success') success(msg);
+              else if (type === 'error') error(msg);
+              else if (type === 'warning') warning(msg);
+              else info(msg);
+            }}
+          />
         )}
 
         {/* Session Info */}
@@ -441,197 +433,29 @@ export default function SmartDSpaceUploader() {
           </div>
         )}
 
-        {/* Folder Selection */}
+        {/* Main Content */}
         {session?.authenticated && (
           <>
-            <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
-              <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-                <FolderOpen className="w-5 h-5" />
-                Folder Selection
-              </h2>
+            <FolderSelector
+              selectedFolders={selectedFolders}
+              onAddFolders={handleAddFolders}
+              onRemoveFolder={handleRemoveFolder}
+              onClearAll={handleClearAll}
+              onAnalyze={handleAnalyze}
+              isAnalyzing={isAnalyzing}
+            />
 
-              <div className="space-y-4">
-                {/* Add Folders Button */}
-                <div className="flex gap-3">
-                  <label className="flex-1 cursor-pointer">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      webkitdirectory=""
-                      multiple
-                      onChange={handleAddFolders}
-                      className="hidden"
-                    />
-                    <div className="flex items-center justify-center gap-2 px-4 py-3 bg-blue-50 text-blue-700 rounded-lg border-2 border-blue-200 hover:bg-blue-100 font-medium">
-                      <Plus className="w-5 h-5" />
-                      Add Folders
-                    </div>
-                  </label>
-                  
-                  {selectedFolders.length > 0 && (
-                    <button
-                      onClick={handleClearAll}
-                      className="px-4 py-3 bg-red-50 text-red-700 rounded-lg border-2 border-red-200 hover:bg-red-100 font-medium flex items-center gap-2"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      Clear All
-                    </button>
-                  )}
-                </div>
-
-                {/* Selected Folders List */}
-                {selectedFolders.length > 0 && (
-                  <div className="border rounded-lg overflow-hidden">
-                    <div className="bg-gray-50 px-4 py-2 border-b flex items-center justify-between">
-                      <span className="font-medium text-gray-700">
-                        Selected Folders ({selectedFolders.length})
-                      </span>
-                    </div>
-                    <div className="max-h-96 overflow-y-auto">
-                      {selectedFolders.map((folder) => (
-                        <div
-                          key={folder.id}
-                          className="flex items-center justify-between px-4 py-3 border-b hover:bg-gray-50"
-                        >
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-lg">
-                                {folder.hasValidMetadata ? '✅' : '❌'}
-                              </span>
-                              <div>
-                                <p className="font-medium text-gray-900">{folder.title}</p>
-                                <p className="text-xs text-gray-500">
-                                  {folder.name} • {folder.fileCount} files
-                                </p>
-                              </div>
-                            </div>
-                            {!folder.hasValidMetadata && (
-                              <p className="text-xs text-red-600 mt-1 ml-7">
-                                Missing or invalid metadata.json
-                              </p>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => handleRemoveFolder(folder.id)}
-                            className="p-2 text-red-600 hover:bg-red-50 rounded-lg"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Analyze Button */}
-                {selectedFolders.length > 0 && (
-                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-                    <p className="text-sm text-purple-800 mb-3">
-                      ⚠️ AI analysis will use Claude API credits. Make sure you've selected all desired folders before analyzing.
-                    </p>
-                    <button
-                      onClick={handleAnalyze}
-                      disabled={isAnalyzing}
-                      className="w-full bg-purple-600 text-white py-3 rounded-lg hover:bg-purple-700 font-medium disabled:bg-gray-400 disabled:cursor-not-allowed"
-                    >
-                      {isAnalyzing ? '🤖 AI Analyzing...' : `🤖 Analyze ${selectedFolders.filter(f => f.hasValidMetadata).length} Folders with AI`}
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Mappings Table */}
             {mappings.length > 0 && (
-              <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
-                <h2 className="text-xl font-semibold mb-4">📊 AI Suggestions</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Suggested Collection</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Confidence</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reasoning</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-200">
-                      {mappings.map((mapping, idx) => (
-                        <tr key={mapping.folderId} className={mapping.status === 'error' ? 'bg-red-50' : ''}>
-                          <td className="px-4 py-3 text-sm text-gray-500">{idx + 1}</td>
-                          <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                            {mapping.title}
-                            <div className="text-xs text-gray-500">{mapping.folderName}</div>
-                          </td>
-                          <td className="px-4 py-3 text-sm">
-                            {mapping.status === 'error' ? (
-                              <span className="text-red-600">{mapping.collectionName}</span>
-                            ) : (
-                              <select
-                                value={mapping.collectionId}
-                                onChange={(e) => {
-                                  const newMappings = [...mappings];
-                                  const col = collections.find(c => c.id === e.target.value || c.uuid === e.target.value);
-                                  const idx = newMappings.findIndex(m => m.folderId === mapping.folderId);
-                                  newMappings[idx].collectionId = e.target.value;
-                                  newMappings[idx].collectionName = col?.name || '';
-                                  setMappings(newMappings);
-                                }}
-                                className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
-                              >
-                                {collections.map(col => (
-                                  <option key={col.id || col.uuid} value={col.id || col.uuid}>
-                                    {col.name}
-                                  </option>
-                                ))}
-                              </select>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-sm">
-                            <span className={`font-semibold ${getConfidenceColor(mapping.confidence)}`}>
-                              {getConfidenceBadge(mapping.confidence)}
-                            </span>
-                            <div className="text-xs text-gray-500">{mapping.confidence}%</div>
-                          </td>
-                          <td className="px-4 py-3 text-sm text-gray-600">
-                            {mapping.reasoning}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                <button
-                  onClick={handleUpload}
-                  disabled={isUploading || mappings.filter(m => m.status === 'ready').length === 0}
-                  className="w-full mt-6 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 font-medium disabled:bg-gray-400"
-                >
-                  {isUploading ? '⏳ Uploading...' : '🚀 Push to DSpace'}
-                </button>
-              </div>
+              <MappingsTable
+                mappings={mappings}
+                collections={collections}
+                onUpdateMapping={handleUpdateMapping}
+                onUpload={handleUpload}
+                isUploading={isUploading}
+              />
             )}
 
-            {/* Upload Status */}
-            {uploadStatus.length > 0 && (
-              <div className="bg-white rounded-xl shadow-lg p-6">
-                <h2 className="text-xl font-semibold mb-4">📈 Upload Status</h2>
-                <div className="space-y-2">
-                  {uploadStatus.map((status, idx) => (
-                    <div
-                      key={idx}
-                      className={`p-4 rounded-lg ${
-                        status.success === null ? 'bg-blue-50' :
-                        status.success ? 'bg-green-50' : 'bg-red-50'
-                      }`}
-                    >
-                      <span className="font-semibold">{status.folderName}:</span> {status.status}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <UploadStatus uploadStatus={uploadStatus} />
           </>
         )}
       </div>
