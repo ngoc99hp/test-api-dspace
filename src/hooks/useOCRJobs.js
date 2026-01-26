@@ -12,7 +12,6 @@ export function useOCRJobs() {
     setError(null);
 
     try {
-      // ✅ Add include_metadata param
       let url = '/api/ocr/jobs';
       const params = new URLSearchParams();
       
@@ -56,7 +55,7 @@ export function useOCRJobs() {
     }
 
     const data = await res.json();
-    await fetchJobs(); // Refresh list
+    await fetchJobs();
     return data;
   };
 
@@ -76,6 +75,25 @@ export function useOCRJobs() {
     a.click();
     window.URL.revokeObjectURL(url);
     document.body.removeChild(a);
+  };
+
+  // ✅ NEW: Delete job function
+  const deleteJob = async (jobId) => {
+    const res = await fetch(`/api/ocr/jobs/${jobId}`, {
+      method: 'DELETE',
+    });
+
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || 'Delete failed');
+    }
+
+    const data = await res.json();
+    
+    // Remove from local state
+    setJobs(prev => prev.filter(j => j.job_id !== jobId));
+    
+    return data;
   };
 
   // Auto-refresh every 5 seconds when there are running jobs
@@ -98,5 +116,6 @@ export function useOCRJobs() {
     fetchJobs,
     uploadFile,
     downloadJob,
+    deleteJob, // ✅ Export delete function
   };
 }

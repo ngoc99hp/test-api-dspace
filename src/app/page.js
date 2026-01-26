@@ -14,7 +14,7 @@ import { useOCRJobs } from "../hooks/useOCRJobs";
 export default function SmartDSpaceUploader() {
   const dspaceUrl = process.env.NEXT_PUBLIC_DSPACE_URL;
   const { toasts, removeToast, success, error, warning, info } = useToast();
-  const { jobs, loading, fetchJobs, downloadJob } = useOCRJobs();
+  const { jobs, loading, fetchJobs, downloadJob, deleteJob } = useOCRJobs();
 
   const [session, setSession] = useState(null);
   const [collections, setCollections] = useState([]);
@@ -69,6 +69,22 @@ export default function SmartDSpaceUploader() {
     }
   };
 
+  // ✅ NEW: Handle delete
+  const handleDelete = async (jobId) => {
+    try {
+      await deleteJob(jobId);
+      success("Job deleted successfully");
+
+      // Remove from selected jobs if it was selected
+      setSelectedJobIds((prev) => prev.filter((id) => id !== jobId));
+
+      // Remove from mappings if it was in analysis
+      setMappings((prev) => prev.filter((m) => m.jobId !== jobId));
+    } catch (err) {
+      error(`Delete failed: ${err.message}`);
+    }
+  };
+
   // Analyze selected jobs with AI
   const handleAnalyze = async () => {
     if (selectedJobIds.length === 0) {
@@ -94,7 +110,7 @@ export default function SmartDSpaceUploader() {
       for (const jobId of selectedJobIds) {
         const job = jobsWithMetadata.find((j) => j.job_id === jobId);
 
-        if (!job || job.status !== 'completed') continue;
+        if (!job || job.status !== "completed") continue;
 
         if (!job.metadata || !job.metadata.metadata) {
           warning(`${job.filename} has no metadata, skipping`);
@@ -148,7 +164,7 @@ export default function SmartDSpaceUploader() {
       });
 
       setMappings(newMappings);
-      setSelectedMappings(newMappings.map(m => m.jobId || m.folderId));
+      setSelectedMappings(newMappings.map((m) => m.jobId || m.folderId));
       success(`Analysis complete! ${newMappings.length} suggestions ready`);
     } catch (err) {
       console.error("Analysis error:", err);
@@ -174,7 +190,10 @@ export default function SmartDSpaceUploader() {
   // Upload to DSpace
   const handleUpload = async () => {
     const toUpload = mappings.filter(
-      (m) => selectedMappings.includes(m.jobId || m.folderId) && m.status === 'ready' && m.collectionId
+      (m) =>
+        selectedMappings.includes(m.jobId || m.folderId) &&
+        m.status === "ready" &&
+        m.collectionId,
     );
 
     if (toUpload.length === 0) {
@@ -296,12 +315,12 @@ export default function SmartDSpaceUploader() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50">
+    <div className="min-h-screen bg-linear-to-br from-blue-50 to-indigo-50">
       <ToastContainer toasts={toasts} removeToast={removeToast} />
-      
+
       <Header session={session} />
 
-      <div className="max-w-[1800px] mx-auto p-8">
+      <div className="max-w-450 mx-auto p-8">
         {!session?.authenticated ? (
           <div className="max-w-xl mx-auto">
             <LoginForm
@@ -330,6 +349,7 @@ export default function SmartDSpaceUploader() {
                 onSelectForDSpace={setSelectedJobIds}
                 onDownload={handleDownload}
                 selectedJobs={selectedJobIds}
+                onDelete={handleDelete}
                 onAnalyze={handleAnalyze}
                 isAnalyzing={isAnalyzing}
               />

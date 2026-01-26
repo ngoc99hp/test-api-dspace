@@ -30,7 +30,7 @@ function TooltipTitle({ title, folderName }) {
       
       {show && (
         <div 
-          className="fixed z-[9999] pointer-events-none w-96"
+          className="fixed z-9999 pointer-events-none w-96"
           style={{ 
             left: `${position.x}px`, 
             top: `${position.y - 70}px` 
@@ -82,7 +82,7 @@ function TooltipReasoning({ reasoning }) {
       
       {show && (
         <div 
-          className="fixed z-[9999] pointer-events-none w-96"
+          className="fixed z-9999 pointer-events-none w-96"
           style={{ 
             left: `${position.x}px`, 
             top: `${position.y - 70}px` 
