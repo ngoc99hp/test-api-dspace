@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Loader2,
   Trash2,
+  AlertCircle,
 } from "lucide-react";
 
 // Component Tooltip cho filename
@@ -36,21 +37,33 @@ function TooltipFilename({ filename, jobId }) {
   );
 }
 
+// ✨ NEW: Tooltip Component for Actions
+function ActionTooltip({ children, text }) {
+  return (
+    <div className="group/tooltip relative inline-block">
+      {children}
+      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/tooltip:block z-50 pointer-events-none whitespace-nowrap">
+        <div className="bg-gray-900 text-white text-xs rounded-lg py-1.5 px-2.5 shadow-xl">
+          {text}
+          <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Ellipsis Pagination Helper
 function getPageNumbers(currentPage, totalPages) {
   const pages = [];
 
-  // Case 1: Tổng <= 7 pages → Hiển thị hết
   if (totalPages <= 7) {
     return Array.from({ length: totalPages }, (_, i) => i + 1);
   }
 
-  // Case 2: Current ở đầu (1-3)
   if (currentPage <= 3) {
     return [1, 2, 3, 4, "...", totalPages];
   }
 
-  // Case 3: Current ở cuối
   if (currentPage >= totalPages - 2) {
     return [
       1,
@@ -62,7 +75,6 @@ function getPageNumbers(currentPage, totalPages) {
     ];
   }
 
-  // Case 4: Current ở giữa
   return [
     1,
     "...",
@@ -122,7 +134,7 @@ export default function OCRJobsList({
   const handleDelete = async (jobId, filename) => {
     if (
       !confirm(
-        `Are you sure you want to delete "${filename}"?\n\nThis will permanently delete all files and cannot be undone.`,
+        `Are you sure you want to delete "${filename}"?\n\nThis will permanently delete all files and cannot be undone.`
       )
     ) {
       return;
@@ -181,7 +193,6 @@ export default function OCRJobsList({
             </h2>
           </div>
 
-          {/* ✅ FIX: Button luôn chiếm chỗ, dùng opacity để ẩn/hiện */}
           <button
             onClick={onAnalyze}
             disabled={isAnalyzing || selectedJobs.length === 0}
@@ -269,6 +280,7 @@ export default function OCRJobsList({
                 {currentJobs.map((job) => {
                   const isSelected = selectedJobs.includes(job.job_id);
                   const isCompleted = job.status === "completed";
+                  const isDeleting = deletingJobId === job.job_id;
 
                   return (
                     <tr
@@ -337,36 +349,63 @@ export default function OCRJobsList({
                           minute: "2-digit",
                         })}
                       </td>
+                      
+                      {/* ✨ IMPROVED ACTIONS SECTION */}
                       <td
                         className="px-6 py-4"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {job.status === "completed" && (
-                          <button
-                            onClick={() => onDownload(job.job_id)}
-                            className="flex items-center gap-2 px-4 py-2 text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg transition-colors font-medium"
-                          >
-                            <Download className="w-4 h-4" />
-                            Download
-                          </button>
-                        )}
-                        {job.status === "failed" && job.error && (
-                          <div className="text-xs text-red-600 bg-red-50 px-3 py-1.5 rounded-lg max-w-50">
-                            {job.error}
-                          </div>
-                        )}
-                        {/* Delete button - for all jobs */}
-                        <button
-                          onClick={() => handleDelete(job.job_id, job.filename)}
-                          disabled={deletingJobId === job.job_id}
-                          className="flex items-center gap-1 text-red-600 hover:text-red-800 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors"
-                          title="Delete"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          {deletingJobId === job.job_id && (
-                            <span className="text-xs">Deleting...</span>
+                        <div className="flex items-center gap-2">
+                          {/* Download Button - Only for completed jobs */}
+                          {job.status === "completed" && (
+                            <ActionTooltip text="Download file">
+                              <button
+                                onClick={() => onDownload(job.job_id)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-all duration-200 hover:shadow-md active:scale-95"
+                              >
+                                <Download className="w-4 h-4" />
+                                {/* <span>Download</span> */}
+                              </button>
+                            </ActionTooltip>
                           )}
-                        </button>
+
+                          {/* Error Message - Only for failed jobs */}
+                          {job.status === "failed" && job.error && (
+                            <ActionTooltip text={job.error}>
+                              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-700 bg-red-50 rounded-lg max-w-40 truncate">
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                <span className="truncate">{job.error}</span>
+                              </div>
+                            </ActionTooltip>
+                          )}
+
+                          {/* Delete Button - Always visible with divider */}
+                          {job.status === "completed" && (
+                            <div className="w-px h-6 bg-gray-300"></div>
+                          )}
+                          
+                          <ActionTooltip text="Delete permanently">
+                            <button
+                              onClick={() => handleDelete(job.job_id, job.filename)}
+                              disabled={isDeleting}
+                              className={`
+                                inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg 
+                                transition-all duration-200 active:scale-95
+                                ${
+                                  isDeleting
+                                    ? "text-gray-400 bg-gray-100 cursor-not-allowed"
+                                    : "text-red-600 bg-red-50 hover:bg-red-100 hover:shadow-md"
+                                }
+                              `}
+                            >
+                              {isDeleting ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-4 h-4" />
+                              )}
+                            </button>
+                          </ActionTooltip>
+                        </div>
                       </td>
                     </tr>
                   );
