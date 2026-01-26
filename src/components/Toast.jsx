@@ -45,11 +45,11 @@ export default function Toast({ message, type = 'info', duration = 3000, onClose
   return (
     <div className={`fixed top-4 right-4 z-50 max-w-md animate-slide-in-right`}>
       <div className={`${bg} border-2 rounded-lg shadow-lg p-4 flex items-start gap-3`}>
-        <Icon className={`w-5 h-5 ${iconColor} flex-shrink-0 mt-0.5`} />
+        <Icon className={`w-5 h-5 ${iconColor} shrink-0 mt-0.5`} />
         <p className={`${text} flex-1 text-sm font-medium`}>{message}</p>
         <button
           onClick={onClose}
-          className={`${text} hover:opacity-70 flex-shrink-0`}
+          className={`${text} hover:opacity-70 shrink-0`}
         >
           <X className="w-4 h-4" />
         </button>

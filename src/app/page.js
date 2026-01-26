@@ -67,7 +67,7 @@ export default function SmartDSpaceUploader() {
     }
   };
 
-  // ✅ UPDATED: Analyze selected jobs with AI
+  // Analyze selected jobs with AI
   const handleAnalyze = async () => {
     if (selectedJobIds.length === 0) {
       warning("Please select completed jobs first");
@@ -78,7 +78,7 @@ export default function SmartDSpaceUploader() {
     info(`Analyzing ${selectedJobIds.length} documents...`);
 
     try {
-      // ✅ Fetch jobs WITH metadata
+      // Fetch jobs WITH metadata
       const jobsRes = await fetch("/api/ocr/jobs?include_metadata=true");
 
       if (!jobsRes.ok) {
@@ -325,10 +325,10 @@ export default function SmartDSpaceUploader() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-8">
+    <div className="min-h-screen bg-linear-to-br from-blue-50 to-indigo-50 p-8">
       <ToastContainer toasts={toasts} removeToast={removeToast} />
 
-      <div className="max-w-7xl mx-auto">
+      <div className="max-w-450 mx-auto">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-900 mb-2">
             🤖 Smart DSpace Uploader with OCR
@@ -364,36 +364,29 @@ export default function SmartDSpaceUploader() {
               }}
             />
 
-            <OCRJobsList
-              jobs={jobs}
-              onSelectForDSpace={setSelectedJobIds}
-              onDownload={handleDownload}
-              selectedJobs={selectedJobIds}
-            />
-
-            {selectedJobIds.length > 0 && (
-              <div className="bg-purple-50 border-2 border-purple-200 rounded-xl p-6 mb-8">
-                <button
-                  onClick={handleAnalyze}
-                  disabled={isAnalyzing}
-                  className="w-full bg-purple-600 text-white py-3 rounded-lg hover:bg-purple-700 font-medium disabled:bg-gray-400 transition-colors"
-                >
-                  {isAnalyzing
-                    ? "🤖 Analyzing..."
-                    : `🤖 Analyze ${selectedJobIds.length} Documents`}
-                </button>
-              </div>
-            )}
-
-            {mappings.length > 0 && (
-              <MappingsTable
-                mappings={mappings}
-                collections={collections}
-                onUpdateMapping={handleUpdateMapping}
-                onUpload={handleUpload}
-                isUploading={isUploading}
+            {/* TWO COLUMN LAYOUT - OCR Jobs & AI Suggestions Side by Side */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+              {/* Left Column: OCR Jobs */}
+              <OCRJobsList
+                jobs={jobs}
+                onSelectForDSpace={setSelectedJobIds}
+                onDownload={handleDownload}
+                selectedJobs={selectedJobIds}
+                onAnalyze={handleAnalyze}
+                isAnalyzing={isAnalyzing}
               />
-            )}
+
+              {/* Right Column: AI Suggestions */}
+              {mappings.length > 0 && (
+                <MappingsTable
+                  mappings={mappings}
+                  collections={collections}
+                  onUpdateMapping={handleUpdateMapping}
+                  onUpload={handleUpload}
+                  isUploading={isUploading}
+                />
+              )}
+            </div>
 
             <UploadStatus uploadStatus={uploadStatus} />
           </>
