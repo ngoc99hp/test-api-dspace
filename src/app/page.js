@@ -6,6 +6,7 @@ import OCRUploader from "../components/OCRUploader";
 import OCRJobsList from "../components/OCRJobsList";
 import MappingsTable from "../components/MappingsTable";
 import UploadStatus from "../components/UploadStatus";
+import Header from "../components/Header";
 import { ToastContainer } from "../components/Toast";
 import { useToast } from "../hooks/useToast";
 import { useOCRJobs } from "../hooks/useOCRJobs";
@@ -19,11 +20,12 @@ export default function SmartDSpaceUploader() {
   const [collections, setCollections] = useState([]);
   const [selectedJobIds, setSelectedJobIds] = useState([]);
   const [mappings, setMappings] = useState([]);
+  const [selectedMappings, setSelectedMappings] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState([]);
 
-  // Load jobs on mount (without metadata initially)
+  // Load jobs on mount
   useEffect(() => {
     fetchJobs();
   }, [fetchJobs]);
@@ -78,7 +80,6 @@ export default function SmartDSpaceUploader() {
     info(`Analyzing ${selectedJobIds.length} documents...`);
 
     try {
-      // Fetch jobs WITH metadata
       const jobsRes = await fetch("/api/ocr/jobs?include_metadata=true");
 
       if (!jobsRes.ok) {
@@ -88,31 +89,18 @@ export default function SmartDSpaceUploader() {
       const jobsData = await jobsRes.json();
       const jobsWithMetadata = jobsData.jobs;
 
-      console.log("Jobs with metadata:", jobsWithMetadata);
-
-      // Build documents array from selected jobs
       const documents = [];
 
       for (const jobId of selectedJobIds) {
         const job = jobsWithMetadata.find((j) => j.job_id === jobId);
 
-        if (!job) {
-          console.warn(`Job ${jobId} not found`);
-          continue;
-        }
-
-        if (job.status !== "completed") {
-          console.warn(`Job ${jobId} not completed, skipping`);
-          continue;
-        }
+        if (!job || job.status !== 'completed') continue;
 
         if (!job.metadata || !job.metadata.metadata) {
-          console.warn(`Job ${jobId} has no metadata, skipping`);
           warning(`${job.filename} has no metadata, skipping`);
           continue;
         }
 
-        // Extract title from metadata
         const titleField = job.metadata.metadata.find(
           (m) => m.key === "dc.title",
         );
@@ -123,8 +111,6 @@ export default function SmartDSpaceUploader() {
           title: titleField?.value || job.filename,
           metadata: job.metadata.metadata,
         });
-
-        console.log(`✅ Prepared ${job.filename} for AI analysis`);
       }
 
       if (documents.length === 0) {
@@ -133,16 +119,10 @@ export default function SmartDSpaceUploader() {
         return;
       }
 
-      console.log(`📊 Sending ${documents.length} documents to AI...`);
-
-      // Batch AI analysis
       const aiRes = await fetch("/api/ai/suggest-collection-batch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          documents,
-          collections,
-        }),
+        body: JSON.stringify({ documents, collections }),
       });
 
       if (!aiRes.ok) {
@@ -152,9 +132,6 @@ export default function SmartDSpaceUploader() {
 
       const aiData = await aiRes.json();
 
-      console.log("AI suggestions:", aiData);
-
-      // Map AI suggestions to jobs
       const newMappings = aiData.suggestions.map((sug) => {
         const doc = documents.find((d) => d.folderName === sug.folderName);
         return {
@@ -171,6 +148,7 @@ export default function SmartDSpaceUploader() {
       });
 
       setMappings(newMappings);
+      setSelectedMappings(newMappings.map(m => m.jobId || m.folderId));
       success(`Analysis complete! ${newMappings.length} suggestions ready`);
     } catch (err) {
       console.error("Analysis error:", err);
@@ -195,21 +173,21 @@ export default function SmartDSpaceUploader() {
 
   // Upload to DSpace
   const handleUpload = async () => {
-    const readyMappings = mappings.filter(
-      (m) => m.status === "ready" && m.collectionId,
+    const toUpload = mappings.filter(
+      (m) => selectedMappings.includes(m.jobId || m.folderId) && m.status === 'ready' && m.collectionId
     );
 
-    if (readyMappings.length === 0) {
-      warning("No items ready to upload");
+    if (toUpload.length === 0) {
+      warning("No items selected to upload");
       return;
     }
 
     setIsUploading(true);
     setUploadStatus([]);
-    info(`Starting upload of ${readyMappings.length} items...`);
+    info(`Starting upload of ${toUpload.length} items...`);
 
-    for (let i = 0; i < readyMappings.length; i++) {
-      const mapping = readyMappings[i];
+    for (let i = 0; i < toUpload.length; i++) {
+      const mapping = toUpload[i];
 
       setUploadStatus((prev) => [
         ...prev,
@@ -221,7 +199,6 @@ export default function SmartDSpaceUploader() {
       ]);
 
       try {
-        // 1. Create item in DSpace
         const createRes = await fetch("/api/dspace/create-item", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -240,7 +217,6 @@ export default function SmartDSpaceUploader() {
         const itemData = await createRes.json();
         let itemId = itemData.itemId;
 
-        // 2. Get item ID if needed
         if (!itemId && itemData.handle) {
           const handleRes = await fetch("/api/dspace/get-item-by-handle", {
             method: "POST",
@@ -259,20 +235,16 @@ export default function SmartDSpaceUploader() {
           throw new Error("Could not get item ID");
         }
 
-        // 3. Download job files
         const downloadRes = await fetch(`/api/ocr/download/${mapping.jobId}`);
         if (!downloadRes.ok) {
           throw new Error("Failed to download job files");
         }
 
         const blob = await downloadRes.blob();
-
-        // 4. Extract PDF from ZIP and upload
         const JSZip = require("jszip");
         const zip = new JSZip();
         const zipContent = await zip.loadAsync(blob);
 
-        // Find PDF file (exclude metadata.json)
         const pdfFile = Object.keys(zipContent.files).find(
           (name) => name.endsWith(".pdf") && !name.includes("metadata"),
         );
@@ -283,7 +255,6 @@ export default function SmartDSpaceUploader() {
 
         const pdfBlob = await zipContent.files[pdfFile].async("blob");
 
-        // Upload bitstream
         const uploadUrl = `/api/dspace/upload-bitstream?itemId=${encodeURIComponent(itemId)}&fileName=${encodeURIComponent(pdfFile)}&dspaceUrl=${encodeURIComponent(dspaceUrl)}`;
 
         const bitstreamRes = await fetch(uploadUrl, {
@@ -325,37 +296,26 @@ export default function SmartDSpaceUploader() {
   };
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-blue-50 to-indigo-50 p-8">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50">
       <ToastContainer toasts={toasts} removeToast={removeToast} />
+      
+      <Header session={session} />
 
-      <div className="max-w-450 mx-auto">
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">
-            🤖 Smart DSpace Uploader with OCR
-          </h1>
-          <p className="text-gray-600">Upload → OCR → AI Analysis → DSpace</p>
-        </div>
-
-        {!session?.authenticated && (
-          <LoginForm
-            dspaceUrl={dspaceUrl}
-            onLoginSuccess={handleLoginSuccess}
-            showToast={(msg, type) => {
-              if (type === "success") success(msg);
-              else if (type === "error") error(msg);
-              else warning(msg);
-            }}
-          />
-        )}
-
-        {session?.authenticated && (
+      <div className="max-w-[1800px] mx-auto p-8">
+        {!session?.authenticated ? (
+          <div className="max-w-xl mx-auto">
+            <LoginForm
+              dspaceUrl={dspaceUrl}
+              onLoginSuccess={handleLoginSuccess}
+              showToast={(msg, type) => {
+                if (type === "success") success(msg);
+                else if (type === "error") error(msg);
+                else warning(msg);
+              }}
+            />
+          </div>
+        ) : (
           <>
-            <div className="bg-green-50 border-2 border-green-200 rounded-xl p-4 mb-8">
-              <h3 className="text-green-800 font-semibold">
-                ✓ Logged in as {session.fullname}
-              </h3>
-            </div>
-
             <OCRUploader
               onUploadSuccess={handleUploadSuccess}
               showToast={(msg, type) => {
@@ -364,9 +324,7 @@ export default function SmartDSpaceUploader() {
               }}
             />
 
-            {/* TWO COLUMN LAYOUT - OCR Jobs & AI Suggestions Side by Side */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-              {/* Left Column: OCR Jobs */}
               <OCRJobsList
                 jobs={jobs}
                 onSelectForDSpace={setSelectedJobIds}
@@ -376,7 +334,6 @@ export default function SmartDSpaceUploader() {
                 isAnalyzing={isAnalyzing}
               />
 
-              {/* Right Column: AI Suggestions */}
               {mappings.length > 0 && (
                 <MappingsTable
                   mappings={mappings}
@@ -384,6 +341,8 @@ export default function SmartDSpaceUploader() {
                   onUpdateMapping={handleUpdateMapping}
                   onUpload={handleUpload}
                   isUploading={isUploading}
+                  selectedMappings={selectedMappings}
+                  onSelectMappings={setSelectedMappings}
                 />
               )}
             </div>
