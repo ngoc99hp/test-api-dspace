@@ -213,3 +213,4 @@ Nếu viết UI để test API nội bộ:
 
 📌 Tài liệu này được viết dựa trên **test thực tế**, không chỉ đọc docs.
 Nếu gặp hành vi "lạ", hãy kiểm tra **header + response raw** trước khi kết luận bug.
+

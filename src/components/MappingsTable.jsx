@@ -40,7 +40,7 @@ export default function MappingsTable({ mappings, collections, onUpdateMapping, 
           <tbody className="divide-y divide-gray-200">
             {mappings.map((mapping, idx) => (
               <tr 
-                key={mapping.folderId} 
+                key={mapping.jobId || mapping.folderId || idx}
                 className={mapping.status === 'error' ? 'bg-red-50' : 'hover:bg-gray-50 transition-colors'}
               >
                 <td className="px-4 py-3 text-sm text-gray-500">{idx + 1}</td>
@@ -56,7 +56,7 @@ export default function MappingsTable({ mappings, collections, onUpdateMapping, 
                       value={mapping.collectionId ?? ''}
                       onChange={(e) => {
                         const col = collections.find(c => (c.id ?? c.uuid) === e.target.value);
-                        onUpdateMapping(mapping.folderId, e.target.value, col?.name ?? '');
+                        onUpdateMapping(mapping.jobId || mapping.folderId, e.target.value, col?.name ?? '');
                       }}
                       className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 transition-shadow"
                     >
