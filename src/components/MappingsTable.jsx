@@ -98,7 +98,17 @@ function TooltipReasoning({ reasoning }) {
   );
 }
 
-// Ellipsis Pagination Helper
+function CommunityBadge({ communityName }) {
+  if (!communityName) return null;
+  
+  return (
+    <div className="flex items-center gap-1 mt-1 text-xs text-gray-600 bg-gray-50 px-2 py-1 rounded">
+      <span>📁</span>
+      <span className="font-medium">{communityName}</span>
+    </div>
+  );
+}
+
 function getPageNumbers(currentPage, totalPages) {
   if (totalPages <= 7) {
     return Array.from({ length: totalPages }, (_, i) => i + 1);
@@ -130,7 +140,8 @@ export default function MappingsTable({
   onUpload, 
   isUploading,
   selectedMappings = [],
-  onSelectMappings 
+  onSelectMappings,
+  dspaceUrl
 }) {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 5;
@@ -147,7 +158,18 @@ export default function MappingsTable({
     return '🔴 Low';
   };
 
-  // Pagination logic
+  const collectionsByComm = React.useMemo(() => {
+    const grouped = {};
+    collections.forEach(col => {
+      const commName = col.communityName || 'Other';
+      if (!grouped[commName]) {
+        grouped[commName] = [];
+      }
+      grouped[commName].push(col);
+    });
+    return grouped;
+  }, [collections]);
+
   const totalPages = Math.ceil(mappings.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
@@ -176,7 +198,6 @@ export default function MappingsTable({
 
   return (
     <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-      {/* Header with Actions */}
       <div className="bg-white px-6 py-4 border-b-2 border-gray-200 relative z-10">
         <div className="flex items-center justify-between">
           <div>
@@ -186,6 +207,11 @@ export default function MappingsTable({
                 ({mappings.length} total, {readyCount} selected)
               </span>
             </h2>
+            {collections.length > 0 && (
+              <p className="text-xs text-gray-500 mt-1">
+                With context from {new Set(collections.map(c => c.communityName)).size} communities
+              </p>
+            )}
           </div>
           
           <button
@@ -206,7 +232,6 @@ export default function MappingsTable({
         </div>
       </div>
 
-      {/* Table */}
       {mappings.length === 0 ? (
         <div className="p-12 text-center">
           <div className="text-gray-400 mb-3">
@@ -224,7 +249,7 @@ export default function MappingsTable({
               <colgroup>
                 <col className="w-12" />
                 <col className="w-80" />
-                <col className="w-64" />
+                <col className="w-80" />
                 <col className="w-28" />
                 <col className="w-96" />
               </colgroup>
@@ -239,7 +264,9 @@ export default function MappingsTable({
                     />
                   </th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Title</th>
-                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Suggested Collection</th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    Suggested Collection
+                  </th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Confidence</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Reasoning</th>
                 </tr>
@@ -280,26 +307,41 @@ export default function MappingsTable({
                       <td className="px-6 py-4 text-sm">
                         <TooltipTitle title={mapping.title} folderName={mapping.folderName} />
                       </td>
+                      
                       <td className="px-6 py-4 text-sm" onClick={(e) => e.stopPropagation()}>
                         {mapping.status === 'error' ? (
                           <span className="text-red-600 font-medium">{mapping.collectionName}</span>
                         ) : (
-                          <select
-                            value={mapping.collectionId ?? ''}
-                            onChange={(e) => {
-                              const col = collections.find(c => (c.id ?? c.uuid) === e.target.value);
-                              onUpdateMapping(mappingId, e.target.value, col?.name ?? '');
-                            }}
-                            className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 transition-shadow"
-                          >
-                            {collections.map(col => (
-                              <option key={col.id ?? col.uuid} value={col.id ?? col.uuid}>
-                                {col.name}
-                              </option>
-                            ))}
-                          </select>
+                          <div className="space-y-2">
+                            <select
+                              value={mapping.collectionId ?? ''}
+                              onChange={(e) => {
+                                const col = collections.find(c => (c.id ?? c.uuid) === e.target.value);
+                                onUpdateMapping(
+                                  mappingId, 
+                                  e.target.value, 
+                                  col?.displayName ?? col?.name ?? ''
+                                );
+                              }}
+                              className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 transition-shadow"
+                            >
+                              {Object.entries(collectionsByComm).map(([commName, cols]) => (
+                                <optgroup key={commName} label={`📁 ${commName}`}>
+                                  {cols.map(col => (
+                                    <option key={col.id ?? col.uuid} value={col.id ?? col.uuid}>
+                                      {col.name}
+                                      {col.archivedItemsCount > 0 && ` (${col.archivedItemsCount} items)`}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ))}
+                            </select>
+                            
+                            <CommunityBadge communityName={mapping.communityName} />
+                          </div>
                         )}
                       </td>
+                      
                       <td className="px-6 py-4 text-sm">
                         <div className={`font-semibold ${getConfidenceColor(mapping.confidence)}`}>
                           {getConfidenceBadge(mapping.confidence)}
@@ -316,7 +358,6 @@ export default function MappingsTable({
             </table>
           </div>
 
-          {/* Pagination */}
           {totalPages > 1 && (
             <div className="bg-gray-50 px-6 py-4 flex items-center justify-between border-t border-gray-200">
               <div className="text-sm text-gray-600">

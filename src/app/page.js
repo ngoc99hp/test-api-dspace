@@ -10,14 +10,23 @@ import Header from "../components/Header";
 import { ToastContainer } from "../components/Toast";
 import { useToast } from "../hooks/useToast";
 import { useOCRJobs } from "../hooks/useOCRJobs";
+import { useDSpaceCollections } from "../hooks/useDSpaceCollections"; // ✅ NEW
 
 export default function SmartDSpaceUploader() {
   const dspaceUrl = process.env.NEXT_PUBLIC_DSPACE_URL;
   const { toasts, removeToast, success, error, warning, info } = useToast();
   const { jobs, loading, fetchJobs, downloadJob, deleteJob } = useOCRJobs();
+  
+  // ✨ NEW: Use collection hook with community context
+  const { 
+    collections, 
+    loading: collectionsLoading,
+    error: collectionsError,
+    fetchCollections,
+    findBestMatch 
+  } = useDSpaceCollections();
 
   const [session, setSession] = useState(null);
-  const [collections, setCollections] = useState([]);
   const [selectedJobIds, setSelectedJobIds] = useState([]);
   const [mappings, setMappings] = useState([]);
   const [selectedMappings, setSelectedMappings] = useState([]);
@@ -30,20 +39,17 @@ export default function SmartDSpaceUploader() {
     fetchJobs();
   }, [fetchJobs]);
 
-  // Load collections after login
+  // ✨ IMPROVED: Load collections with community context
   const loadCollections = async () => {
     try {
-      const res = await fetch("/api/dspace/get-collections", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ dspaceUrl }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setCollections(data.collections);
-        console.log(`Loaded ${data.collections.length} collections`);
+      info("Loading collections with community context...");
+      const cols = await fetchCollections(dspaceUrl);
+      
+      if (cols && cols.length > 0) {
+        success(
+          `Loaded ${cols.length} collections with hierarchy ` +
+          `from ${new Set(cols.map(c => c.communityName)).size} communities`
+        );
       }
     } catch (err) {
       error(`Failed to load collections: ${err.message}`);
@@ -52,7 +58,7 @@ export default function SmartDSpaceUploader() {
 
   const handleLoginSuccess = async (sessionData) => {
     setSession(sessionData);
-    await loadCollections();
+    await loadCollections(); // ✅ Now loads with community context
   };
 
   const handleUploadSuccess = () => {
@@ -69,23 +75,19 @@ export default function SmartDSpaceUploader() {
     }
   };
 
-  // ✅ NEW: Handle delete
   const handleDelete = async (jobId) => {
     try {
       await deleteJob(jobId);
       success("Job deleted successfully");
 
-      // Remove from selected jobs if it was selected
       setSelectedJobIds((prev) => prev.filter((id) => id !== jobId));
-
-      // Remove from mappings if it was in analysis
       setMappings((prev) => prev.filter((m) => m.jobId !== jobId));
     } catch (err) {
       error(`Delete failed: ${err.message}`);
     }
   };
 
-  // Analyze selected jobs with AI
+  // ✨ IMPROVED: Analyze with community context
   const handleAnalyze = async () => {
     if (selectedJobIds.length === 0) {
       warning("Please select completed jobs first");
@@ -93,7 +95,7 @@ export default function SmartDSpaceUploader() {
     }
 
     setIsAnalyzing(true);
-    info(`Analyzing ${selectedJobIds.length} documents...`);
+    info(`Analyzing ${selectedJobIds.length} documents with community context...`);
 
     try {
       const jobsRes = await fetch("/api/ocr/jobs?include_metadata=true");
@@ -135,10 +137,20 @@ export default function SmartDSpaceUploader() {
         return;
       }
 
+      // ✨ Log để debug
+      console.log('Collections sent to AI:', collections.slice(0, 3).map(c => ({
+        name: c.name,
+        communityName: c.communityName,
+        displayName: c.displayName
+      })));
+
       const aiRes = await fetch("/api/ai/suggest-collection-batch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ documents, collections }),
+        body: JSON.stringify({ 
+          documents, 
+          collections // ✅ Now includes communityName and fullContext
+        }),
       });
 
       if (!aiRes.ok) {
@@ -148,14 +160,25 @@ export default function SmartDSpaceUploader() {
 
       const aiData = await aiRes.json();
 
+      // ✨ IMPROVED: Build mappings with community context
       const newMappings = aiData.suggestions.map((sug) => {
         const doc = documents.find((d) => d.folderName === sug.folderName);
+        
+        // ✅ Find collection to get full context
+        const collection = collections.find(
+          c => (c.id || c.uuid) === sug.collectionId
+        );
+        
         return {
           jobId: doc?.jobId || sug.documentIndex,
           folderName: sug.folderName,
           title: doc?.title || sug.folderName,
           collectionId: sug.collectionId,
           collectionName: sug.collectionName,
+          // ✨ NEW: Add community context
+          collectionDisplayName: collection?.displayName || sug.collectionName,
+          communityName: collection?.communityName || sug.communityName || '',
+          fullContext: collection?.fullContext || sug.collectionName,
           confidence: sug.confidence,
           reasoning: sug.reasoning,
           status: "ready",
@@ -165,7 +188,26 @@ export default function SmartDSpaceUploader() {
 
       setMappings(newMappings);
       setSelectedMappings(newMappings.map((m) => m.jobId || m.folderId));
-      success(`Analysis complete! ${newMappings.length} suggestions ready`);
+      
+      // ✨ IMPROVED: Show detailed stats
+      const highConfidence = newMappings.filter(m => m.confidence >= 80).length;
+      const mediumConfidence = newMappings.filter(m => m.confidence >= 60 && m.confidence < 80).length;
+      const lowConfidence = newMappings.filter(m => m.confidence < 60).length;
+      
+      success(
+        `Analysis complete! ${newMappings.length} suggestions ready:\n` +
+        `🟢 ${highConfidence} high confidence (80-100%)\n` +
+        `🟡 ${mediumConfidence} medium confidence (60-79%)\n` +
+        `🔴 ${lowConfidence} low confidence (<60%)`
+      );
+      
+      // ✨ Log community distribution for debugging
+      const communityDist = {};
+      newMappings.forEach(m => {
+        communityDist[m.communityName] = (communityDist[m.communityName] || 0) + 1;
+      });
+      console.log('Community distribution:', communityDist);
+      
     } catch (err) {
       console.error("Analysis error:", err);
       error(`Analysis failed: ${err.message}`);
@@ -180,8 +222,17 @@ export default function SmartDSpaceUploader() {
       const updated = [...prev];
       const idx = updated.findIndex((m) => (m.jobId || m.folderId) === id);
       if (idx !== -1) {
+        // ✅ Update với community context
+        const collection = collections.find(c => (c.id || c.uuid) === collectionId);
+        
         updated[idx].collectionId = collectionId;
         updated[idx].collectionName = collectionName;
+        
+        if (collection) {
+          updated[idx].collectionDisplayName = collection.displayName;
+          updated[idx].communityName = collection.communityName;
+          updated[idx].fullContext = collection.fullContext;
+        }
       }
       return updated;
     });
@@ -212,6 +263,10 @@ export default function SmartDSpaceUploader() {
         ...prev,
         {
           folderName: mapping.folderName,
+          // ✨ Show community context in status
+          communityContext: mapping.communityName 
+            ? `${mapping.communityName} > ${mapping.collectionName}`
+            : mapping.collectionName,
           status: "Uploading...",
           success: null,
         },
@@ -291,6 +346,9 @@ export default function SmartDSpaceUploader() {
           const updated = [...prev];
           updated[i] = {
             folderName: mapping.folderName,
+            communityContext: mapping.communityName 
+              ? `${mapping.communityName} > ${mapping.collectionName}`
+              : mapping.collectionName,
             status: `✅ Success! ID: ${itemId}, Handle: ${itemData.handle ?? "Pending"}`,
             success: true,
           };
@@ -302,6 +360,9 @@ export default function SmartDSpaceUploader() {
           const updated = [...prev];
           updated[i] = {
             folderName: mapping.folderName,
+            communityContext: mapping.communityName 
+              ? `${mapping.communityName} > ${mapping.collectionName}`
+              : mapping.collectionName,
             status: `❌ Failed: ${err.message}`,
             success: false,
           };
@@ -335,6 +396,48 @@ export default function SmartDSpaceUploader() {
           </div>
         ) : (
           <>
+            {/* ✨ Show collections loading state */}
+            {collectionsLoading && (
+              <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <div className="flex items-center gap-2 text-blue-700">
+                  <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                  <span className="font-medium">Loading collections with community hierarchy...</span>
+                </div>
+              </div>
+            )}
+
+            {/* ✨ Show collections error */}
+            {collectionsError && (
+              <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                <p className="text-red-700 font-medium">⚠️ Error loading collections</p>
+                <p className="text-sm text-red-600 mt-1">{collectionsError}</p>
+                <button
+                  onClick={loadCollections}
+                  className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {/* ✨ Show collections info */}
+            {collections.length > 0 && (
+              <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+                <div className="flex items-center gap-2 text-green-700">
+                  <span className="text-xl">✅</span>
+                  <div>
+                    <p className="font-semibold">
+                      {collections.length} collections loaded from{' '}
+                      {new Set(collections.map(c => c.communityName)).size} communities
+                    </p>
+                    <p className="text-xs text-green-600 mt-1">
+                      AI matching with community context enabled
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <OCRUploader
               onUploadSuccess={handleUploadSuccess}
               showToast={(msg, type) => {
@@ -363,6 +466,7 @@ export default function SmartDSpaceUploader() {
                   isUploading={isUploading}
                   selectedMappings={selectedMappings}
                   onSelectMappings={setSelectedMappings}
+                  dspaceUrl={dspaceUrl} // ✅ Pass for CollectionSelector if needed
                 />
               )}
             </div>
