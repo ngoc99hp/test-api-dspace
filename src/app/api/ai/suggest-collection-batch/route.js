@@ -1,4 +1,5 @@
 // File: src/app/api/ai/suggest-collection-batch/route.js
+
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -14,7 +15,6 @@ export async function POST(req) {
       );
     }
 
-    // ✅ Lấy API key từ environment variable
     const apiKey = process.env.CLAUDE_API_KEY;
 
     if (!apiKey) {
@@ -24,14 +24,17 @@ export async function POST(req) {
       );
     }
 
-    // Build collections list
+    // ✅ FIXED: Build collections list WITH COMMUNITY CONTEXT
     const collectionsStr = collections
       .map(
         (c, idx) =>
           `${idx + 1}. ID: ${c.id || c.uuid}
    Name: ${c.name}
+   Community: ${c.communityName || "N/A"}
+   Full Context: ${c.fullContext || c.displayName || c.name}
    Description: ${c.description || "N/A"}
-   Handle: ${c.handle || "N/A"}`,
+   Handle: ${c.handle || "N/A"}
+   Items Count: ${c.archivedItemsCount || 0}`,
       )
       .join("\n\n");
 
@@ -49,7 +52,10 @@ ${metadataStr}`;
       })
       .join("\n\n" + "=".repeat(80) + "\n\n");
 
+    // ✅ ENHANCED PROMPT with community context awareness
     const prompt = `You are a library cataloging expert. You need to analyze MULTIPLE documents and suggest the most appropriate DSpace collection for EACH document.
+
+IMPORTANT: Collections with the SAME NAME may exist in DIFFERENT COMMUNITIES. Pay close attention to the "Community" and "Full Context" fields to distinguish them.
 
 AVAILABLE COLLECTIONS:
 ${collectionsStr}
@@ -60,11 +66,20 @@ ${documentsStr}
 
 TASK:
 For EACH document (1 to ${documents.length}):
-1. Analyze the document's metadata (title, author, subject, type, abstract, etc.)
+1. Analyze the document's metadata (title, author, subject, type, department, abstract, etc.)
 2. Match it with the most appropriate collection
-3. Consider: document type, subject area, academic level, language
-4. Provide confidence score (0-100)
-5. Give brief reasoning (max 2 sentences)
+3. CRITICAL: Pay special attention to:
+   - Document type (Khóa luận, Đồ án, Giáo trình, etc.)
+   - Department/Faculty mentioned in metadata (CNTT, Du lịch, XD, Môi trường, etc.)
+   - Community context of each collection
+4. If multiple collections have the same name, choose based on community match
+5. Provide confidence score (0-100)
+6. Give brief reasoning (max 2 sentences)
+
+EXAMPLE MATCHING LOGIC:
+- If document mentions "Khoa CNTT" or "Công nghệ thông tin" → Choose collection in "Khoa Công nghệ thông tin" community
+- If document is "Khóa luận" type → Choose "Khóa luận tốt nghiệp" collection in matching department community
+- If document is "Giáo trình" in "Du lịch" field → Choose "Giáo trình" in "Khoa Du lịch" community, NOT in "Khoa CNTT"
 
 RESPOND ONLY WITH THIS JSON FORMAT (no markdown, no explanation):
 {
@@ -74,16 +89,9 @@ RESPOND ONLY WITH THIS JSON FORMAT (no markdown, no explanation):
       "folderName": "folder_name_here",
       "collectionId": "the collection ID",
       "collectionName": "the collection name",
+      "communityName": "the community name",
       "confidence": 85,
-      "reasoning": "Brief explanation"
-    },
-    {
-      "documentIndex": 1,
-      "folderName": "folder_name_here",
-      "collectionId": "the collection ID",
-      "collectionName": "the collection name",
-      "confidence": 90,
-      "reasoning": "Brief explanation"
+      "reasoning": "Brief explanation mentioning community match"
     }
   ]
 }
@@ -92,10 +100,10 @@ CRITICAL: Return suggestions array with EXACTLY ${documents.length} items, one f
 Return ONLY valid JSON, no markdown blocks, no additional text.`;
 
     console.log(
-      `Analyzing ${documents.length} documents in single API call...`,
+      `Analyzing ${documents.length} documents with community context in single API call...`,
     );
 
-    // Call Claude API - SINGLE REQUEST for ALL documents
+    // Call Claude API
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -105,7 +113,7 @@ Return ONLY valid JSON, no markdown blocks, no additional text.`;
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 4096, // Increased for batch processing
+        max_tokens: 4096,
         messages: [
           {
             role: "user",
@@ -130,7 +138,6 @@ Return ONLY valid JSON, no markdown blocks, no additional text.`;
     // Parse AI response
     let result;
     try {
-      // Remove markdown code blocks if present
       const cleaned = aiResponse
         .replace(/```json\n?/g, "")
         .replace(/```\n?/g, "")
@@ -161,7 +168,7 @@ Return ONLY valid JSON, no markdown blocks, no additional text.`;
       );
     }
 
-    console.log(`Successfully analyzed ${result.suggestions.length} documents`);
+    console.log(`Successfully analyzed ${result.suggestions.length} documents with community context`);
 
     return NextResponse.json({
       success: true,
