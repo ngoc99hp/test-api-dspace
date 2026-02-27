@@ -1,10 +1,12 @@
+// =============================================================================
+// src/app/api/ocr/download/[jobId]/route.js
+// =============================================================================
+
 import { NextResponse } from 'next/server';
 
 export async function GET(req, { params }) {
   try {
-    // ✅ Await params trước khi access
     const { jobId } = await params;
-    
     const ocrApiUrl = process.env.NEXT_PUBLIC_OCR_API_URL;
 
     const res = await fetch(`${ocrApiUrl}/api/v2/download/${jobId}`);
@@ -16,14 +18,15 @@ export async function GET(req, { params }) {
       );
     }
 
-    // Stream ZIP file
-    const blob = await res.blob();
-    const filename = res.headers.get('content-disposition')?.match(/filename\*?=['"]?([^'";\n]+)/)?.[1] || `${jobId}.zip`;
+    // ✅ THAY ĐỔI: Dùng res.body (stream) thay vì res.blob()
+    // Không đợi tải xong → Browser nhận ngay và hiện dialog
+    const body = res.body;
 
-    return new NextResponse(blob, {
+    return new NextResponse(body, {
       headers: {
         'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Disposition': `attachment; filename="${jobId}.zip"`,
+        'Content-Length': res.headers.get('content-length') || '',
       },
     });
 
@@ -34,3 +37,4 @@ export async function GET(req, { params }) {
     );
   }
 }
+

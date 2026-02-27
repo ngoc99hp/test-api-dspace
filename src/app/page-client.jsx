@@ -1,403 +1,331 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useCallback } from "react";
 import OCRUploader from "@/components/OCRUploader";
 import OCRJobsList from "@/components/OCRJobsList";
-import MappingsTable from "@/components/MappingsTable";
-import UploadStatus from "@/components/UploadStatus";
-import { ToastContainer } from "@/components/Toast";
-import { useToast } from "@/hooks/useToast";
+import ReadyForDSpaceTable from "@/components/ReadyForDSpaceTable";
+import MetadataSidePanel from "@/components/MetadataSidePanel";
 import { useOCRJobs } from "@/hooks/useOCRJobs";
 
+const OCR_API_URL = process.env.NEXT_PUBLIC_OCR_API_URL;
+const DSPACE_URL  = process.env.NEXT_PUBLIC_DSPACE_URL;
+
 export default function PageClient({ session, initialCollections = [] }) {
-  const dspaceUrl = process.env.NEXT_PUBLIC_DSPACE_URL;
-  const { toasts, removeToast, success, error, warning, info } = useToast();
-  const { jobs, loading, fetchJobs, downloadJob, deleteJob } = useOCRJobs();
+  const collections = initialCollections;
 
-  const [collections, setCollections] = useState(initialCollections);
-  const [selectedJobIds, setSelectedJobIds] = useState([]);
-  const [mappings, setMappings] = useState([]);
-  const [selectedMappings, setSelectedMappings] = useState([]);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const {
+    jobs,
+    fetchJobs,
+    deleteJob,
+    downloadJob,
+    saveDSpaceCollection,
+    updateDSpaceStatus,
+  } = useOCRJobs();
+
+  const [editingJob,  setEditingJob]  = useState(null);
+  const [pushingIds,  setPushingIds]  = useState(new Set());
   const [isUploading, setIsUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [toast,       setToast]       = useState(null);
 
-  // Load jobs on mount
-  useEffect(() => {
-    fetchJobs();
-  }, [fetchJobs]);
-
-  const handleUploadSuccess = () => {
-    fetchJobs();
-    info("Files uploaded to OCR queue");
+  const showToast = (msg, type = "info") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3500);
   };
 
-  const handleDownload = async (jobId) => {
+  // ---------------------------------------------------------------
+  // Helper: cap nhat dc.department trong metadata khi collection thay doi
+  // ---------------------------------------------------------------
+  const updateDepartmentMetadata = useCallback(async (jobId, collectionName) => {
+    if (!jobId || !collectionName) return;
     try {
-      await downloadJob(jobId);
-      success("Download started");
-    } catch (err) {
-      error(`Download failed: ${err.message}`);
-    }
-  };
+      // Lay metadata hien tai
+      const res = await fetch(`${OCR_API_URL}/api/v2/jobs/${jobId}/metadata`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const fields = data.metadata || [];
 
+      // Tim va cap nhat dc.department, hoac them moi neu chua co
+      const idx = fields.findIndex(f => f.key === "dc.department");
+      let updated;
+      if (idx !== -1) {
+        updated = fields.map((f, i) =>
+          i === idx ? { ...f, value: collectionName } : f
+        );
+      } else {
+        updated = [...fields, { key: "dc.department", value: collectionName, language: "en_US" }];
+      }
+
+      await fetch(`${OCR_API_URL}/api/v2/jobs/${jobId}/metadata`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metadata: updated }),
+      });
+    } catch (err) {
+      console.warn(`Could not update dc.department for ${jobId}:`, err);
+    }
+  }, []);
+
+  // ---------------------------------------------------------------
+  // Upload
+  // ---------------------------------------------------------------
+  const handleUploadSuccess = () => fetchJobs();
+
+  // ---------------------------------------------------------------
+  // Delete / Cancel (bang 1)
+  // ---------------------------------------------------------------
   const handleDelete = async (jobId) => {
     try {
       await deleteJob(jobId);
-      success("Job deleted successfully");
-
-      setSelectedJobIds((prev) => prev.filter((id) => id !== jobId));
-      setMappings((prev) => prev.filter((m) => m.jobId !== jobId));
     } catch (err) {
-      error(`Delete failed: ${err.message}`);
+      showToast(`Delete failed: ${err.message}`, "error");
     }
   };
 
-  const handleAnalyze = async () => {
-    if (selectedJobIds.length === 0) {
-      warning("Please select completed jobs first");
-      return;
+  // ---------------------------------------------------------------
+  // Collection change tu select (bang 2)
+  // ---------------------------------------------------------------
+  const handleCollectionChange = useCallback(async (jobId, collectionId, collectionName, communityName) => {
+    try {
+      await saveDSpaceCollection(jobId, collectionId, collectionName, communityName);
+      // Cap nhat dc.department = ten collection vua chon
+      await updateDepartmentMetadata(jobId, collectionName);
+    } catch (err) {
+      showToast(`Could not save collection: ${err.message}`, "error");
     }
+  }, [saveDSpaceCollection, updateDepartmentMetadata]);
 
-    if (collections.length === 0) {
-      error("Collections not loaded yet. Please wait...");
-      return;
-    }
+  // ---------------------------------------------------------------
+  // AI Suggest
+  // ---------------------------------------------------------------
+  const handleAISuggest = useCallback(async (selectedJobs) => {
+    if (!selectedJobs.length) { showToast("No jobs selected", "warning"); return; }
 
     setIsAnalyzing(true);
-    info(`Analyzing ${selectedJobIds.length} documents with community context...`);
+    showToast(`Analyzing ${selectedJobs.length} documents...`, "info");
 
     try {
-      const jobsRes = await fetch("/api/ocr/jobs?include_metadata=true");
-
-      if (!jobsRes.ok) {
-        throw new Error("Failed to fetch jobs with metadata");
-      }
-
-      const jobsData = await jobsRes.json();
-      const jobsWithMetadata = jobsData.jobs;
-
       const documents = [];
-
-      for (const jobId of selectedJobIds) {
-        const job = jobsWithMetadata.find((j) => j.job_id === jobId);
-
-        if (!job || job.status !== "completed") continue;
-
-        if (!job.metadata || !job.metadata.metadata) {
-          warning(`${job.filename} has no metadata, skipping`);
-          continue;
-        }
-
-        const titleField = job.metadata.metadata.find(
-          (m) => m.key === "dc.title"
-        );
-
-        documents.push({
-          jobId: job.job_id,
-          folderName: job.filename.replace(".pdf", ""),
-          title: titleField?.value || job.filename,
-          metadata: job.metadata.metadata,
-        });
+      for (const job of selectedJobs) {
+        try {
+          const res  = await fetch(`${OCR_API_URL}/api/v2/jobs/${job.job_id}/metadata`);
+          const data = res.ok ? await res.json() : { metadata: [] };
+          const title = data.metadata?.find(m => m.key === "dc.title")?.value || job.filename;
+          documents.push({
+            jobId:      job.job_id,
+            folderName: job.filename.replace(".pdf", ""),
+            title,
+            metadata:   data.metadata || [],
+          });
+        } catch { continue; }
       }
 
-      if (documents.length === 0) {
-        error("No valid documents with metadata found");
-        setIsAnalyzing(false);
-        return;
-      }
-
-      console.log(
-        "Collections sent to AI:",
-        collections.slice(0, 3).map((c) => ({
-          name: c.name,
-          communityName: c.communityName,
-          displayName: c.displayName,
-        }))
-      );
+      if (!documents.length) { showToast("No metadata found", "error"); return; }
 
       const aiRes = await fetch("/api/ai/suggest-collection-batch", {
-        method: "POST",
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          documents,
-          collections,
-        }),
+        body: JSON.stringify({ documents, collections }),
       });
+      if (!aiRes.ok) throw new Error((await aiRes.json()).error || "AI failed");
+      const { suggestions } = await aiRes.json();
 
-      if (!aiRes.ok) {
-        const errorData = await aiRes.json();
-        throw new Error(errorData.error || "AI analysis failed");
-      }
-
-      const aiData = await aiRes.json();
-
-      const newMappings = aiData.suggestions.map((sug) => {
-        const doc = documents.find((d) => d.folderName === sug.folderName);
-
-        const collection = collections.find(
-          (c) => (c.id || c.uuid) === sug.collectionId
-        );
-
-        return {
-          jobId: doc?.jobId || sug.documentIndex,
-          folderName: sug.folderName,
-          title: doc?.title || sug.folderName,
-          collectionId: sug.collectionId,
-          collectionName: sug.collectionName,
-          collectionDisplayName: collection?.displayName || sug.collectionName,
-          communityName: collection?.communityName || sug.communityName || "",
-          fullContext: collection?.fullContext || sug.collectionName,
-          confidence: sug.confidence,
-          reasoning: sug.reasoning,
-          status: "ready",
-          metadata: doc?.metadata || [],
-        };
-      });
-
-      setMappings(newMappings);
-      setSelectedMappings(newMappings.map((m) => m.jobId || m.folderId));
-
-      const highConfidence = newMappings.filter((m) => m.confidence >= 80).length;
-      const mediumConfidence = newMappings.filter(
-        (m) => m.confidence >= 60 && m.confidence < 80
-      ).length;
-      const lowConfidence = newMappings.filter((m) => m.confidence < 60).length;
-
-      success(
-        `Analysis complete! ${newMappings.length} suggestions ready:\n` +
-          `🟢 ${highConfidence} high confidence (80-100%)\n` +
-          `🟡 ${mediumConfidence} medium confidence (60-79%)\n` +
-          `🔴 ${lowConfidence} low confidence (<60%)`
+      const results = await Promise.allSettled(
+        suggestions.map(async sug => {
+          const col   = collections.find(c => (c.id || c.uuid) === sug.collectionId);
+          const jobId = sug.jobId || documents.find(d => d.folderName === sug.folderName)?.jobId;
+          if (!jobId) return;
+          await saveDSpaceCollection(jobId, sug.collectionId, sug.collectionName, col?.communityName || "");
+          // Cap nhat dc.department = ten collection AI goi y
+          await updateDepartmentMetadata(jobId, sug.collectionName);
+        })
       );
 
-      const communityDist = {};
-      newMappings.forEach((m) => {
-        communityDist[m.communityName] = (communityDist[m.communityName] || 0) + 1;
-      });
-      console.log("Community distribution:", communityDist);
+      const ok   = results.filter(r => r.status === "fulfilled").length;
+      const fail = results.filter(r => r.status === "rejected").length;
+      showToast(`AI suggested ${ok} collections${fail ? `, ${fail} failed` : ""}`, "success");
+
     } catch (err) {
-      console.error("Analysis error:", err);
-      error(`Analysis failed: ${err.message}`);
+      showToast(`AI analysis failed: ${err.message}`, "error");
     } finally {
       setIsAnalyzing(false);
     }
-  };
+  }, [collections, saveDSpaceCollection, updateDepartmentMetadata]);
 
-  const handleUpdateMapping = (id, collectionId, collectionName) => {
-    setMappings((prev) => {
-      const updated = [...prev];
-      const idx = updated.findIndex((m) => (m.jobId || m.folderId) === id);
-      if (idx !== -1) {
-        const collection = collections.find(
-          (c) => (c.id || c.uuid) === collectionId
-        );
-
-        updated[idx].collectionId = collectionId;
-        updated[idx].collectionName = collectionName;
-
-        if (collection) {
-          updated[idx].collectionDisplayName = collection.displayName;
-          updated[idx].communityName = collection.communityName;
-          updated[idx].fullContext = collection.fullContext;
-        }
-      }
-      return updated;
-    });
-  };
-
-  const handleUpload = async () => {
-    const toUpload = mappings.filter(
-      (m) =>
-        selectedMappings.includes(m.jobId || m.folderId) &&
-        m.status === "ready" &&
-        m.collectionId
-    );
-
-    if (toUpload.length === 0) {
-      warning("No items selected to upload");
-      return;
+  // ---------------------------------------------------------------
+  // Push to DSpace
+  // ---------------------------------------------------------------
+  const pushJob = useCallback(async (job) => {
+    if (!job.dspace_collection_id) {
+      showToast(`Select a collection for "${job.filename}" first`, "warning");
+      return false;
     }
+
+    setPushingIds(prev => new Set([...prev, job.job_id]));
+    try {
+      await updateDSpaceStatus(job.job_id, "uploading").catch(() => {});
+
+      // Lay metadata moi nhat tu DB
+      const metaRes  = await fetch(`${OCR_API_URL}/api/v2/jobs/${job.job_id}/metadata`);
+      const metaData = metaRes.ok ? await metaRes.json() : { metadata: [] };
+
+      // Tao item
+      const createRes = await fetch("/api/dspace/create-item", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          collectionId: job.dspace_collection_id,
+          metadata:     metaData.metadata,
+          dspaceUrl:    DSPACE_URL,
+        }),
+      });
+      if (!createRes.ok) throw new Error("Failed to create DSpace item");
+      const itemData = await createRes.json();
+
+      // Resolve itemId
+      let itemId = itemData.itemId;
+      if (!itemId && itemData.handle) {
+        const hRes = await fetch("/api/dspace/get-item-by-handle", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ handle: itemData.handle, dspaceUrl: DSPACE_URL }),
+        });
+        if (hRes.ok) itemId = (await hRes.json()).id;
+      }
+      if (!itemId) throw new Error("Could not get DSpace item ID");
+
+      // Upload PDF
+      const dlRes  = await fetch(`/api/ocr/download/${job.job_id}`);
+      if (!dlRes.ok) throw new Error("Failed to download processed files");
+
+      const JSZip  = (await import("jszip")).default;
+      const zip    = await new JSZip().loadAsync(await dlRes.blob());
+      const pdfKey = Object.keys(zip.files).find(n => n.endsWith(".pdf") && !n.includes("metadata"));
+      if (!pdfKey) throw new Error("PDF not found in output");
+
+      const upRes = await fetch(
+        `/api/dspace/upload-bitstream?itemId=${encodeURIComponent(itemId)}&fileName=${encodeURIComponent(pdfKey)}&dspaceUrl=${encodeURIComponent(DSPACE_URL)}`,
+        { method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: await zip.files[pdfKey].async("blob") }
+      );
+      if (!upRes.ok) throw new Error("Failed to upload PDF");
+
+      await updateDSpaceStatus(job.job_id, "uploaded", {
+        itemId: itemData.itemId || itemId,
+        handle: itemData.handle || null,
+      });
+      return true;
+
+    } catch (err) {
+      console.error(`Push failed for ${job.filename}:`, err);
+      await updateDSpaceStatus(job.job_id, "upload_failed", { error: err.message }).catch(() => {});
+      return false;
+    } finally {
+      setPushingIds(prev => { const n = new Set(prev); n.delete(job.job_id); return n; });
+    }
+  }, [updateDSpaceStatus]);
+
+  const handleDownloadBatch = useCallback((jobIds) => {
+    // Tao URL voi query params va redirect - batch ZIP endpoint
+    const params = new URLSearchParams();
+    jobIds.forEach(id => params.append("ids", id));
+    window.location.href = `/api/ocr/download/batch?${params.toString()}`;
+  }, []);
+
+  const handlePushSingle = useCallback(async (job) => {
+    const ok = await pushJob(job);
+    showToast(
+      ok ? `"${job.filename}" uploaded successfully` : `Failed to push "${job.filename}"`,
+      ok ? "success" : "error"
+    );
+  }, [pushJob]);
+
+  const handlePushSelected = useCallback(async (selectedJobs) => {
+    const pushable = selectedJobs.filter(j => j.dspace_collection_id && j.dspace_status !== "uploaded");
+    if (!pushable.length) { showToast("Select a collection for each job first", "warning"); return; }
 
     setIsUploading(true);
-    setUploadStatus([]);
-    info(`Starting upload of ${toUpload.length} items...`);
+    showToast(`Pushing ${pushable.length} items...`, "info");
 
-    for (let i = 0; i < toUpload.length; i++) {
-      const mapping = toUpload[i];
+    const results = await Promise.allSettled(pushable.map(j => pushJob(j)));
+    const ok   = results.filter(r => r.value === true).length;
+    const fail = pushable.length - ok;
 
-      setUploadStatus((prev) => [
-        ...prev,
-        {
-          folderName: mapping.folderName,
-          communityContext: mapping.communityName
-            ? `${mapping.communityName} > ${mapping.collectionName}`
-            : mapping.collectionName,
-          status: "Uploading...",
-          success: null,
-        },
-      ]);
-
-      try {
-        const createRes = await fetch("/api/dspace/create-item", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            collectionId: mapping.collectionId,
-            metadata: mapping.metadata,
-            dspaceUrl,
-          }),
-        });
-
-        if (!createRes.ok) {
-          throw new Error("Failed to create item");
-        }
-
-        const itemData = await createRes.json();
-        let itemId = itemData.itemId;
-
-        if (!itemId && itemData.handle) {
-          const handleRes = await fetch("/api/dspace/get-item-by-handle", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ handle: itemData.handle, dspaceUrl }),
-          });
-
-          if (handleRes.ok) {
-            const handleData = await handleRes.json();
-            itemId = handleData.id;
-          }
-        }
-
-        if (!itemId) {
-          throw new Error("Could not get item ID");
-        }
-
-        const downloadRes = await fetch(`/api/ocr/download/${mapping.jobId}`);
-        if (!downloadRes.ok) {
-          throw new Error("Failed to download job files");
-        }
-
-        const blob = await downloadRes.blob();
-        const JSZip = require("jszip");
-        const zip = new JSZip();
-        const zipContent = await zip.loadAsync(blob);
-
-        const pdfFile = Object.keys(zipContent.files).find(
-          (name) => name.endsWith(".pdf") && !name.includes("metadata")
-        );
-
-        if (!pdfFile) {
-          throw new Error("PDF file not found in job output");
-        }
-
-        const pdfBlob = await zipContent.files[pdfFile].async("blob");
-
-        const uploadUrl = `/api/dspace/upload-bitstream?itemId=${encodeURIComponent(itemId)}&fileName=${encodeURIComponent(pdfFile)}&dspaceUrl=${encodeURIComponent(dspaceUrl)}`;
-
-        const bitstreamRes = await fetch(uploadUrl, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/octet-stream" },
-          body: pdfBlob,
-        });
-
-        if (!bitstreamRes.ok) {
-          throw new Error("Failed to upload PDF");
-        }
-
-        setUploadStatus((prev) => {
-          const updated = [...prev];
-          updated[i] = {
-            folderName: mapping.folderName,
-            communityContext: mapping.communityName
-              ? `${mapping.communityName} > ${mapping.collectionName}`
-              : mapping.collectionName,
-            status: `✅ Success! ID: ${itemId}, Handle: ${itemData.handle ?? "Pending"}`,
-            success: true,
-          };
-          return updated;
-        });
-      } catch (err) {
-        console.error(`Upload error for ${mapping.folderName}:`, err);
-        setUploadStatus((prev) => {
-          const updated = [...prev];
-          updated[i] = {
-            folderName: mapping.folderName,
-            communityContext: mapping.communityName
-              ? `${mapping.communityName} > ${mapping.collectionName}`
-              : mapping.collectionName,
-            status: `❌ Failed: ${err.message}`,
-            success: false,
-          };
-          return updated;
-        });
-      }
-    }
-
+    showToast(`Done: ${ok} uploaded${fail ? `, ${fail} failed` : ""}`, fail === 0 ? "success" : "warning");
     setIsUploading(false);
-    success("Upload complete!");
-  };
+  }, [pushJob]);
 
+  // ---------------------------------------------------------------
+  // Metadata saved callback
+  // ---------------------------------------------------------------
+  const handleMetadataSaved = useCallback(() => {
+    showToast("Metadata saved", "success");
+  }, []);
+
+  // ---------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------
   return (
-    <>
-      <ToastContainer toasts={toasts} removeToast={removeToast} />
+    <div className="space-y-4">
 
-      {/* Collections Status */}
       {collections.length > 0 && (
-        <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-          <div className="flex items-center gap-2 text-green-700">
-            <span className="text-xl">✅</span>
-            <div>
-              <p className="font-semibold">
-                {collections.length} collections loaded from{" "}
-                {new Set(collections.map((c) => c.communityName)).size} communities
-              </p>
-              <p className="text-xs text-green-600 mt-1">
-                AI matching with community context enabled
-              </p>
-            </div>
-          </div>
+        <div className="flex items-center gap-2 px-4 py-2.5 bg-green-50 border border-green-200 rounded-xl text-sm text-green-700">
+          <span>✅</span>
+          <span className="font-medium">{collections.length} collections</span>
+          <span className="text-green-600">
+            from {new Set(collections.map(c => c.communityName)).size} communities loaded
+          </span>
         </div>
       )}
 
-      <OCRUploader
-        onUploadSuccess={handleUploadSuccess}
-        showToast={(msg, type) => {
-          if (type === "success") success(msg);
-          else error(msg);
-        }}
+      <OCRUploader onUploadSuccess={handleUploadSuccess} showToast={showToast} />
+
+      <OCRJobsList jobs={jobs} onDelete={handleDelete} />
+
+      <ReadyForDSpaceTable
+        jobs={jobs}
+        collections={collections}
+        onEditJob={setEditingJob}
+        onPushSingle={handlePushSingle}
+        onPushSelected={handlePushSelected}
+        onAISuggest={handleAISuggest}
+        onCollectionChange={handleCollectionChange}
+        onDownloadJob={downloadJob}
+        onDownloadBatch={handleDownloadBatch}
+        onDeleteJob={handleDelete}
+        isAnalyzing={isAnalyzing}
+        isUploading={isUploading}
+        pushingIds={pushingIds}
       />
 
-      {/* ✨ CHANGED: Vertical Layout */}
-      <div className="space-y-6 mb-8">
-        <OCRJobsList
-          jobs={jobs}
-          onSelectForDSpace={setSelectedJobIds}
-          onDownload={handleDownload}
-          selectedJobs={selectedJobIds}
-          onDelete={handleDelete}
-          onAnalyze={handleAnalyze}
-          isAnalyzing={isAnalyzing}
+      {editingJob && (
+        <MetadataSidePanel
+          job={jobs.find(j => j.job_id === editingJob.job_id) || editingJob}
+          onClose={() => setEditingJob(null)}
+          onSaved={handleMetadataSaved}
+          onPush={async (jobId) => {
+            const job = jobs.find(j => j.job_id === jobId);
+            if (job) await handlePushSingle(job);
+          }}
         />
+      )}
 
-        {mappings.length > 0 && (
-          <MappingsTable
-            mappings={mappings}
-            collections={collections}
-            onUpdateMapping={handleUpdateMapping}
-            onUpload={handleUpload}
-            isUploading={isUploading}
-            selectedMappings={selectedMappings}
-            onSelectMappings={setSelectedMappings}
-            dspaceUrl={dspaceUrl}
-          />
-        )}
-      </div>
+      {toast && (
+        <div className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-lg animate-fade-in-up pointer-events-none ${toast.type === "success" ? "bg-green-600 text-white" : toast.type === "error" ? "bg-red-600 text-white" : toast.type === "warning" ? "bg-amber-500 text-white" : "bg-gray-800 text-white"}`}
+        >
+          {toast.msg}
+        </div>
+      )}
 
-      <UploadStatus uploadStatus={uploadStatus} />
-    </>
+      <style jsx>{`
+        @keyframes fade-in-up {
+          from { opacity: 0; transform: translateY(6px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in-up { animation: fade-in-up 0.2s ease-out; }
+      `}</style>
+    </div>
   );
 }

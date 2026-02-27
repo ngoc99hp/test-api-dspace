@@ -10,7 +10,7 @@ export default function Header({ session }) {
             <span className="text-3xl">🤖</span>
             <div>
               <h1 className="text-2xl font-bold text-gray-900">
-                Smart DSpace Uploader
+                Document Processing System
               </h1>
               <p className="text-sm text-gray-500">Upload → OCR → AI Analysis → DSpace</p>
             </div>
